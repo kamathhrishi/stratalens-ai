@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import get_cors_origins, get_extended_cors_origins
-from utils.logging_utils import log_info
+from app.utils.logging_utils import log_info
 
 
 def setup_middleware(app: FastAPI):

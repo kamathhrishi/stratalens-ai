@@ -10,7 +10,7 @@ import uvicorn
 
 from app import app
 from config import settings
-from utils.logging_utils import log_info
+from app.utils.logging_utils import log_info
 
 # Try to import analyzer to check availability
 try:

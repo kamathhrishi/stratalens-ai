@@ -45,7 +45,7 @@ except ImportError:
             pass
 
 # Import logging utilities
-from utils.logging_utils import log_message, log_error, log_warning, log_info
+from app.utils.logging_utils import log_message, log_error, log_warning, log_info
 
 # Import metadata and reference data
 from .metadata import get_enhanced_table_metadata, AVAILABLE_SECTORS, AVAILABLE_INDUSTRIES

@@ -6,7 +6,7 @@ This file is kept for backward compatibility with imports.
 """
 
 # Re-export all analytics models from schemas
-from schemas.analytics import (
+from app.schemas.analytics import (
     UserType,
     ChatAnalytics,
     AnalyticsSummary,

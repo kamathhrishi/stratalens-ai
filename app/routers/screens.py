@@ -13,14 +13,14 @@ from datetime import datetime
 import logging
 
 # Import centralized utilities
-from auth.auth_utils import get_current_user
+from app.auth.auth_utils import get_current_user
 from db.db_utils import get_db
-from utils import create_error_response, raise_sanitized_http_exception
-from utils.logging_utils import log_message, log_error, log_warning, log_info, log_debug, log_milestone
+from app.utils import create_error_response, raise_sanitized_http_exception
+from app.utils.logging_utils import log_message, log_error, log_warning, log_info, log_debug, log_milestone
 
 # Import schemas from centralized location
-from schemas import ExpandValueResponse, ExpandScreenValueRequest
-from schemas.screens import SaveScreenRequest, SavedScreen, ScreenData, UpdateScreenRequest
+from app.schemas import ExpandValueResponse, ExpandScreenValueRequest
+from app.schemas.screens import SaveScreenRequest, SavedScreen, ScreenData, UpdateScreenRequest
 
 logger = logging.getLogger(__name__)
 

@@ -11,7 +11,7 @@ from config import settings
 from app.lifespan import lifespan
 from app.middleware import setup_middleware
 from app.routes import setup_routes
-from utils.logfire_config import init_logfire, is_logfire_active
+from app.utils.logfire_config import init_logfire, is_logfire_active
 
 # Create FastAPI app
 app = FastAPI(
@@ -28,10 +28,10 @@ try:
     import logfire
     if is_logfire_active():
         logfire.instrument_fastapi(app)
-        from utils.logging_utils import log_info
+        from app.utils.logging_utils import log_info
         log_info("✅ FastAPI instrumented with Logfire")
 except Exception as e:
-    from utils.logging_utils import log_warning
+    from app.utils.logging_utils import log_warning
     log_warning(f"⚠️ Could not instrument FastAPI with Logfire: {e}")
 
 # Setup middleware

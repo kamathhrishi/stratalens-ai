@@ -36,7 +36,7 @@ from config import get_required_env_var, get_optional_env_var, settings
 
 from fastapi import APIRouter
 # Import comprehensive logging
-from utils.logging_utils import log_message, log_error, log_warning, log_info, log_debug, log_milestone
+from app.utils.logging_utils import log_message, log_error, log_warning, log_info, log_debug, log_milestone
 
 
 router = APIRouter(
@@ -78,7 +78,7 @@ if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
     )
 
 # Import schemas from centralized location
-from schemas.auth import (
+from app.schemas.auth import (
     UserLogin, UserRegistration, MagicLinkRequest, MagicLinkVerify,
     PasswordReset, PasswordChange, OnboardingCompletion
 )

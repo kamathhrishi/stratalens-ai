@@ -6,8 +6,8 @@ Handles PostgreSQL database setup, table creation, and schema management
 import asyncpg
 from typing import Optional
 from config import settings, get_database_pool_config
-from utils.logging_utils import log_info
-from routers.screens import init_screens_tables
+from app.utils.logging_utils import log_info
+from app.routers.screens import init_screens_tables
 
 
 async def setup_connection(connection):

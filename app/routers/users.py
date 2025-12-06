@@ -14,15 +14,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer
 
 # Import models
-from schemas import (
+from app.schemas import (
     UserProfileResponse, UserProfileUpdate, OnboardingCompleteRequest, UsageStats
 )
 
 # Import dependencies
-from auth.auth_utils import get_current_user
+from app.auth.auth_utils import get_current_user
 from db.db_utils import get_db
-from utils.logging_utils import log_info, log_error
-from utils.error_handlers import create_error_response, raise_sanitized_http_exception
+from app.utils.logging_utils import log_info, log_error
+from app.utils.error_handlers import create_error_response, raise_sanitized_http_exception
 
 # Import rate limiting and constants from main server
 # These will be set by the main server

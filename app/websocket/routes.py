@@ -12,10 +12,10 @@ from datetime import datetime
 
 from fastapi import WebSocket, WebSocketDisconnect, HTTPException
 
-from auth.auth_utils import authenticate_user_by_id
+from app.auth.auth_utils import authenticate_user_by_id
 from app.lifespan import get_db_pool, get_websocket_manager
 from config import settings
-from websocket.types import MessageType, WebSocketMessage
+from app.websocket.types import MessageType, WebSocketMessage
 
 logger = logging.getLogger(__name__)
 

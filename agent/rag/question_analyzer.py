@@ -17,7 +17,7 @@ import openai
 
 # Import local modules
 from .config import Config
-from schemas.rag import QuestionAnalysisResult
+from app.schemas.rag import QuestionAnalysisResult
 from .conversation_memory import ConversationMemory
 from .rag_utils import parse_json_with_repair
 from agent.prompts import (

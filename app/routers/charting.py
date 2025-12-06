@@ -17,9 +17,9 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # Import centralized utilities
-from auth.auth_utils import get_current_user
+from app.auth.auth_utils import get_current_user
 from db.db_utils import get_db
-from utils.error_handlers import create_error_response, raise_sanitized_http_exception
+from app.utils.error_handlers import create_error_response, raise_sanitized_http_exception
 
 # Set up logging
 logger = logging.getLogger(__name__)

@@ -21,10 +21,10 @@ def set_analyzer_globals(available: bool, instance=None):
     analyzer_instance = instance
 
 # Import centralized utilities
-from auth.auth_utils import get_current_user
+from app.auth.auth_utils import get_current_user
 from db.db_utils import get_db
-from utils import create_error_response, raise_sanitized_http_exception
-from utils.logging_utils import logger
+from app.utils import create_error_response, raise_sanitized_http_exception
+from app.utils.logging_utils import logger
 
 def get_analyzer():
     """Get the analyzer instance"""

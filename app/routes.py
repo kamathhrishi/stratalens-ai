@@ -7,19 +7,19 @@ Sets up all API routes, frontend routes, and static file serving.
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse
 
-from auth import auth
-from auth import router as auth_router
-from auth.auth_utils import get_db
+from app.auth import auth
+from app.auth import router as auth_router
+from app.auth.auth_utils import get_db
 from config import get_cors_origins, settings
-from routers.charting import router as charting_router
-from routers.chat import router as chat_router
-from routers.companies import router as companies_router
-from routers.companies_financials import router as companies_financials_router
-from routers.screens import router as screens_router
-from routers.screener import router as screener_router
-from routers.transcript import router as transcript_router
-from routers.users import router as users_router
-from websocket.routes import websocket_endpoint
+from app.routers.charting import router as charting_router
+from app.routers.chat import router as chat_router
+from app.routers.companies import router as companies_router
+from app.routers.companies_financials import router as companies_financials_router
+from app.routers.screens import router as screens_router
+from app.routers.screener import router as screener_router
+from app.routers.transcript import router as transcript_router
+from app.routers.users import router as users_router
+from app.websocket.routes import websocket_endpoint
 
 
 def setup_routes(app: FastAPI):
@@ -227,7 +227,7 @@ def setup_public_endpoints(app: FastAPI):
     """Setup public API endpoints"""
     from config import get_cors_origins
     from app.lifespan import get_analyzer_instance, get_db_pool
-    from utils.general_utils import get_memory_usage
+    from app.utils.general_utils import get_memory_usage
     from config import settings
     from datetime import datetime
     

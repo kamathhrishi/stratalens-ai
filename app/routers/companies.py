@@ -8,9 +8,9 @@ from typing import Dict, List, Any, Optional
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.security import HTTPAuthorizationCredentials
 
-from schemas import CompanySearchResult, CompanySearchResponse
+from app.schemas import CompanySearchResult, CompanySearchResponse
 from agent.screener import FinancialDataAnalyzer
-from utils.logging_utils import log_info, log_error, log_warning
+from app.utils.logging_utils import log_info, log_error, log_warning
 import logging
 
 logger = logging.getLogger(__name__)
@@ -128,9 +128,9 @@ def post_process_segment_data(segments: List[Dict], segment_type: str, symbol: s
 router = APIRouter(prefix="/companies", tags=["companies"])
 
 # Import centralized utilities
-from auth.auth_utils import get_current_user
+from app.auth.auth_utils import get_current_user
 from db.db_utils import get_db
-from utils import create_error_response, raise_sanitized_http_exception
+from app.utils import create_error_response, raise_sanitized_http_exception
 import psycopg2
 from psycopg2.extras import RealDictCursor
 

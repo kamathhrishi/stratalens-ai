@@ -9,7 +9,7 @@ import re
 from typing import Dict
 
 from fastapi import APIRouter, Depends, HTTPException
-from auth.auth_utils import get_current_user, get_optional_user
+from app.auth.auth_utils import get_current_user, get_optional_user
 
 # RAG system imports (optional)
 try:
@@ -197,7 +197,7 @@ async def get_transcript_with_highlights(
     except HTTPException:
         raise
     except Exception as e:
-        from utils import raise_sanitized_http_exception
+        from app.utils import raise_sanitized_http_exception
         raise_sanitized_http_exception(
             e, 
             "transcript with highlights fetch", 

@@ -13,11 +13,11 @@ from typing import Optional
 from fastapi import FastAPI
 
 from config import settings
-from auth.auth import hash_password
+from app.auth.auth import hash_password
 from db.db_utils import get_db, set_db_pool
-from utils.database_init import init_database
-from utils.logfire_config import init_logfire
-from utils.logging_utils import log_error, log_info, log_warning
+from app.utils.database_init import init_database
+from app.utils.logfire_config import init_logfire
+from app.utils.logging_utils import log_error, log_info, log_warning
 
 # Global instances (will be initialized in lifespan)
 db_pool = None
@@ -189,7 +189,7 @@ async def initialize_redis_and_websocket():
     
     # Initialize WebSocket components
     log_info("🔌 Initializing WebSocket components...")
-    from websocket import SessionManager, BackgroundTaskManager, WebSocketManager, StrataLensWebSocketHandlers
+    from app.websocket import SessionManager, BackgroundTaskManager, WebSocketManager, StrataLensWebSocketHandlers
     
     session_manager = SessionManager(redis_client)
     background_task_manager = BackgroundTaskManager()
@@ -353,10 +353,10 @@ async def setup_authentication_and_routing():
     """Set up authentication and routing configuration"""
     global analyzer_instance, db_pool
     
-    from auth import auth
-    from utils import rate_limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_MONTH, ADMIN_RATE_LIMIT_PER_MONTH
-    from routers.screener import set_analyzer_instance
-    from routers.users import set_user_globals
+    from app.auth import auth
+    from app.utils import rate_limiter, RATE_LIMIT_PER_MINUTE, RATE_LIMIT_PER_MONTH, ADMIN_RATE_LIMIT_PER_MONTH
+    from app.routers.screener import set_analyzer_instance
+    from app.routers.users import set_user_globals
     
     # Set up centralized database and authentication
     log_info("🔐 Setting up centralized database and authentication...")

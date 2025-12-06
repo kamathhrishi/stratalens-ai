@@ -17,27 +17,27 @@ from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from schemas import (
+from app.schemas import (
     ChatMessage, ChatResponse, ChatCitation, ChatHistoryItem,
     ChatHistoryResponse, ChatClearRequest, ChatClearResponse,
     ChatConversation, ChatConversationMessage, ChatConversationsResponse, ChatConversationRequest
 )
 from config import settings
-from utils import rate_limiter, RATE_LIMIT_PER_MONTH, record_successful_query_usage
+from app.utils import rate_limiter, RATE_LIMIT_PER_MONTH, record_successful_query_usage
 from agent import Agent as RAGSystem, create_agent as create_rag_system
-from utils.logging_utils import log_info, log_error, log_warning
-from utils import create_error_response, raise_sanitized_http_exception
+from app.utils.logging_utils import log_info, log_error, log_warning
+from app.utils import create_error_response, raise_sanitized_http_exception
 from db.db_connection_utils import get_postgres_connection
-from auth.auth_utils import get_current_user
+from app.auth.auth_utils import get_current_user
 
 # Import PostgreSQL connection utilities
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
 # Import centralized utilities
-from auth.auth_utils import get_current_user, get_optional_user
+from app.auth.auth_utils import get_current_user, get_optional_user
 from db.db_utils import get_db
-from utils import create_error_response, raise_sanitized_http_exception
+from app.utils import create_error_response, raise_sanitized_http_exception
 from analytics.analytics_utils import log_chat_analytics, get_analytics_summary, get_analytics_data
 from analytics.analytics import UserType, AnalyticsQuery, AnalyticsResponse, AnalyticsSummary
 
