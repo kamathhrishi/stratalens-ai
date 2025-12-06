@@ -555,15 +555,8 @@ class ChatInterface {
             
             // Handle demo limit specifically
             if (error.message.startsWith('DEMO_LIMIT:')) {
-                const limitMessage = error.message.replace('DEMO_LIMIT: ', '');
-                this.addMessage('assistant', 
-                    `${limitMessage}\n\n` +
-                    `**Upgrade to StrataLens Professional for:**\n` +
-                    `• Unlimited financial analysis queries\n` +
-                    `• Advanced data export capabilities\n` +
-                    `• Full access to historical datasets\n` +
-                    `• Priority processing and support\n\n` +
-                    `Contact our team to explore enterprise solutions.`, [], 'upgrade');
+                this.addMessage('assistant',
+                    `Your free requests for today have been used. Please try again tomorrow.`, [], 'info');
             } else {
                 this.addMessage('assistant', `Sorry, I encountered an error: ${error.message}`, [], 'error');
             }
