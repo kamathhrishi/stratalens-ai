@@ -57,3 +57,5 @@ email-validator
 # Development and monitoring
 tenacity==9.0.0
 logfire[fastapi]
+logfire[asyncpg]
+
