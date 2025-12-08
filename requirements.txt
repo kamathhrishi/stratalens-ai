@@ -51,6 +51,7 @@ pydantic==2.10.6
 pydantic[email]==2.10.6
 pydantic-settings==2.7.1
 pydantic_core==2.27.2
+tavily==1.1.0
 email-validator
 
 # Development and monitoring
