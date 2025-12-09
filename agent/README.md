@@ -2,32 +2,112 @@
 
 Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **intelligent tool routing** and **self-reflection** for financial Q&A. This powers the chat and analysis features on stratalens.ai.
 
-## File Structure
+## Architecture Overview
+
+The agent follows a **broad-to-deep** execution pattern:
 
 ```
-agent/
-├── agent.py                    # Main entry point - Agent class
-├── agent_config.py             # Agent configuration (iterations, thresholds)
-├── prompts.py                  # Centralized LLM prompt templates
-├── screener_agent.py           # Financial screener (text-to-SQL)
-│
-├── rag/                        # RAG implementation
-│   ├── rag_agent.py            # Orchestration engine & tool routing
-│   ├── question_analyzer.py    # Query parsing & data source routing
-│   ├── search_engine.py        # Hybrid search (vector + keyword)
-│   ├── response_generator.py   # LLM response & evaluation
-│   ├── database_manager.py     # PostgreSQL/pgvector operations
-│   ├── conversation_memory.py  # Multi-turn conversation state
-│   ├── transcript_service.py   # Transcript metadata
-│   ├── sec_filings_service.py  # SEC 10-K retrieval with LLM routing
-│   ├── tavily_service.py       # Real-time news search
-│   ├── config.py               # RAG configuration
-│   ├── rag_utils.py            # Utility functions
-│   └── data_ingestion/         # Data pipeline → see data_ingestion/README.md
-│
-└── screener/                   # Financial screener
-    └── metadata.py             # Screener metadata
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         HIGH-LEVEL FLOW                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   Question ──► Analyze & Route ──► Retrieve from Tools ──► Generate     │
+│                     │                      │                    │        │
+│                     │                      │                    ▼        │
+│                     │                      │              ┌──────────┐   │
+│                     │                      │              │ Evaluate │   │
+│                     │                      │              │ Quality  │   │
+│                     │                      │              └────┬─────┘   │
+│                     │                      │                   │         │
+│                     │                      │         confident?│         │
+│                     │                      │              NO ──┴── YES   │
+│                     │                      │              │         │    │
+│                     │                      ◄─────────────┘         ▼    │
+│                     │                   (iterate)            Final Answer│
+│                     │                                                    │
+│                     ▼                                                    │
+│   ┌─────────────────────────────────────────────────────────┐           │
+│   │              TOOL ROUTING (Question Analyzer)            │           │
+│   │  ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐    │           │
+│   │  │  Earnings   │ │  SEC 10-K   │ │   Real-Time     │    │           │
+│   │  │ Transcripts │ │   Filings   │ │     News        │    │           │
+│   │  │  (default)  │ │             │ │    (Tavily)     │    │           │
+│   │  └─────────────┘ └─────────────┘ └─────────────────┘    │           │
+│   └─────────────────────────────────────────────────────────┘           │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Concepts:**
+1. **Question Analysis** - LLM determines which data sources to query
+2. **Tool Routing** - Routes to earnings transcripts, SEC filings, or news
+3. **Self-Reflection** - Evaluates answer quality and iterates if needed (Agent Mode)
+
+---
+
+## Self-Reflection Loop (Agent Mode)
+
+When running in Agent Mode (`max_iterations > 1`), the system performs iterative self-improvement. This is the core intelligence that separates a simple RAG from an agentic system.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ITERATION LOOP                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐                                           │
+│  │ Generate Answer  │ ◄─────────────────────────────────┐       │
+│  └────────┬─────────┘                                   │       │
+│           │                                              │       │
+│           ▼                                              │       │
+│  ┌──────────────────┐                                   │       │
+│  │ Evaluate Quality │                                   │       │
+│  │ • completeness   │                                   │       │
+│  │ • accuracy       │                                   │       │
+│  │ • clarity        │                                   │       │
+│  │ • specificity    │                                   │       │
+│  └────────┬─────────┘                                   │       │
+│           │                                              │       │
+│           ▼                                              │       │
+│  ┌──────────────────┐      YES    ┌─────────────────┐   │       │
+│  │ Should Iterate?  │ ──────────► │ Generate        │   │       │
+│  │ (confidence<0.9) │             │ Follow-up       │ ──┘       │
+│  └────────┬─────────┘             │ Questions       │           │
+│           │ NO                    └─────────────────┘           │
+│           ▼                                                      │
+│  ┌──────────────────┐                                           │
+│  │   Final Answer   │                                           │
+│  └──────────────────┘                                           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Evaluation Criteria:**
+- `completeness_score` (0-10): Does the answer fully address the question?
+- `accuracy_score` (0-10): Is the information factually correct based on context?
+- `clarity_score` (0-10): Is the answer well-structured and easy to understand?
+- `specificity_score` (0-10): Does it include specific numbers, dates, quotes?
+- `overall_confidence` (0-1): Weighted combination used for iteration decisions
+
+**During iteration, the agent can autonomously decide to:**
+- Search for more transcripts via `needs_transcript_search`
+- Search for news via `needs_news_search` (triggers Tavily)
+
+**Stopping Conditions:**
+1. Confidence score ≥ 90% threshold
+2. Agent determines answer is sufficient (`should_iterate=false`)
+3. Max iterations reached
+4. No follow-up questions generated
+
+---
+
+## Operating Modes
+
+| Mode | Config | Latency | Use Case |
+|------|--------|---------|----------|
+| **Chat Mode** | `max_iterations=1` | ~3-5s | Production on stratalens.ai |
+| **Agent Mode** | `max_iterations=3-4` | ~10-20s | Local testing, complex queries |
+
+---
 
 ## How the Agent Chooses Tools
 
@@ -354,52 +434,6 @@ PostgreSQL Table: transcript_chunks
 └── metadata: JSONB
 ```
 
-## Agent Mode: Self-Reflection Loop
-
-When running in Agent Mode (`max_iterations > 1`), the system performs iterative self-improvement:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ITERATION LOOP                                │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────────┐                                           │
-│  │ Generate Answer  │ ◄─────────────────────────────────┐       │
-│  └────────┬─────────┘                                   │       │
-│           │                                              │       │
-│           ▼                                              │       │
-│  ┌──────────────────┐                                   │       │
-│  │ Evaluate Quality │                                   │       │
-│  │ • completeness   │                                   │       │
-│  │ • accuracy       │                                   │       │
-│  │ • clarity        │                                   │       │
-│  │ • specificity    │                                   │       │
-│  └────────┬─────────┘                                   │       │
-│           │                                              │       │
-│           ▼                                              │       │
-│  ┌──────────────────┐      YES    ┌─────────────────┐   │       │
-│  │ Should Iterate?  │ ──────────► │ Generate        │   │       │
-│  │ (confidence<0.9) │             │ Follow-up       │ ──┘       │
-│  └────────┬─────────┘             │ Questions       │           │
-│           │ NO                    └─────────────────┘           │
-│           ▼                                                      │
-│  ┌──────────────────┐                                           │
-│  │   Final Answer   │                                           │
-│  └──────────────────┘                                           │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-During iteration, the agent can also autonomously decide to:
-- **Search for more transcripts** via `needs_transcript_search`
-- **Search for news** via `needs_news_search` (triggers Tavily)
-
-**Stopping Conditions:**
-1. Confidence score ≥ 90% threshold
-2. Agent determines answer is sufficient (`should_iterate=false`)
-3. Max iterations reached
-4. No follow-up questions generated
-
 ## Key Components
 
 ### Core Files
@@ -427,27 +461,6 @@ During iteration, the agent can also autonomously decide to:
 | `rag/conversation_memory.py` | Multi-turn conversation state for context-aware questions |
 | `prompts.py` | Centralized LLM prompt templates |
 | `rag/config.py` | RAG configuration (chunk sizes, search weights, model names) |
-
-## Operating Modes
-
-### Chat Mode (Production)
-- **Status**: Production on stratalens.ai
-- **Config**: `max_iterations=1` (single-pass RAG)
-- **Latency**: ~3-5s
-- **Behavior**: Question → Route → Retrieve → Generate → Answer
-
-### Agent Mode (Experimental)
-- **Status**: Local testing only
-- **Config**: `max_iterations=3-4` (with self-reflection)
-- **Latency**: ~10-20s (3-4x slower)
-- **Behavior**: Question → Route → Retrieve → Generate → Evaluate → (if needed) Search More → Regenerate → Answer
-
-**Evaluation Criteria (Agent Mode):**
-- `completeness_score` (0-10): Does the answer fully address the question?
-- `accuracy_score` (0-10): Is the information factually correct based on context?
-- `clarity_score` (0-10): Is the answer well-structured and easy to understand?
-- `specificity_score` (0-10): Does it include specific numbers, dates, quotes?
-- `overall_confidence` (0-1): Weighted combination used for iteration decisions
 
 ## Data Storage
 
