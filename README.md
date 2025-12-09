@@ -62,6 +62,8 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **i
 2. **Tool Routing** - Automatically routes to earnings transcripts, SEC filings, or news based on question
 3. **Self-Reflection** - Evaluates answer quality and iterates until confident (≥90%) or max iterations reached
 
+**Benchmark:** 85% accuracy on [FinanceBench](https://github.com/patronus-ai/financebench) (SEC filings only), evaluated using LLM-as-a-judge. Full benchmark setup coming soon.
+
 For detailed agent documentation, see [agent/README.md](agent/README.md).
 
 ---
