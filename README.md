@@ -1,7 +1,6 @@
-[Complete README is yet to be updated] 
-
 # StrataLens AI
-Stratalens AI is equity research platform. You can ask questions and get answers to questions from 10K filings, earnings calls and news. 
+
+Stratalens AI is equity research platform. You can ask questions and get answers to questions from 10K filings, earnings calls and news.
 
 **Live Platform:** [stratalens.ai](https://stratalens.ai)
 
@@ -19,12 +18,31 @@ Unlike generic LLMs that rely on web content, StrataLens uses the same authorita
 - **AI/ML:** OpenAI, Groq, LangChain, RAG (Retrieval-Augmented Generation)
 - **Frontend:** Vanilla JS, Tailwind CSS
 
+## Project Structure
+
+```
+stratalens_ai/
+├── agent/                  # AI agent & RAG system         → see agent/README.md
+│   ├── rag/               # RAG implementation
+│   │   └── data_ingestion/# Data pipeline                  → see data_ingestion/README.md
+│   └── screener/          # Financial screener
+├── app/                   # FastAPI application
+│   ├── routers/           # API endpoints
+│   ├── schemas/           # Pydantic models
+│   ├── auth/              # Authentication
+│   └── websocket/         # WebSocket handlers
+├── frontend/              # Web interface
+├── db/                    # Database utilities
+├── analytics/             # Usage analytics
+└── experiments/           # Development & benchmarking (gitignored)
+```
+
 ## Quick Start
 
 ### Prerequisites
 - Python 3.9+
 - PostgreSQL 12+ with pgvector extension
-- See .env for required services
+- See [Requirements](#requirements) for full dependency list
 
 ### Installation
 
@@ -70,6 +88,95 @@ python fastapi_server.py
 
 Access the application at `http://localhost:8000`
 
+## Requirements
+
+### Required API Keys
+
+| Service | Environment Variable | Purpose |
+|---------|---------------------|---------|
+| OpenAI | `OPENAI_API_KEY` | Response generation, embeddings |
+| Groq | `GROQ_API_KEY` | Fast question analysis |
+| API Ninjas | `API_NINJAS_KEY` | Transcript downloads |
+
+### Optional API Keys
+
+| Service | Environment Variable | Purpose |
+|---------|---------------------|---------|
+| Tavily | `TAVILY_API_KEY` | Web search augmentation |
+| Logfire | `LOGFIRE_TOKEN` | Monitoring/observability |
+| Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Google login |
+
+### Database
+
+| Service | Environment Variable | Notes |
+|---------|---------------------|-------|
+| PostgreSQL | `DATABASE_URL` | Requires [pgvector](https://github.com/pgvector/pgvector) extension |
+| Redis | `REDIS_URL` | Optional, for caching |
+
+### Python Dependencies
+
+#### Core Framework
+| Package | Version | Purpose |
+|---------|---------|---------|
+| fastapi | latest | Async web framework |
+| uvicorn[standard] | latest | ASGI server |
+| starlette | latest | ASGI toolkit |
+
+#### Database
+| Package | Version | Purpose |
+|---------|---------|---------|
+| asyncpg | 0.30.0 | Async PostgreSQL driver |
+| psycopg2-binary | latest | PostgreSQL adapter |
+| SQLAlchemy | latest | ORM |
+| redis | 5.2.1 | Caching |
+
+#### Authentication
+| Package | Version | Purpose |
+|---------|---------|---------|
+| python-jose[cryptography] | latest | JWT handling |
+| PyJWT | latest | JWT tokens |
+| passlib[bcrypt] | 1.7.4 | Password hashing |
+| Authlib | 1.2.1 | OAuth support |
+| google-auth | 2.23.4 | Google OAuth |
+| google-auth-httplib2 | 0.1.1 | Google HTTP client |
+| google-auth-oauthlib | 1.1.0 | Google OAuth flow |
+
+#### AI/ML
+| Package | Version | Purpose |
+|---------|---------|---------|
+| openai | latest | GPT API |
+| langchain | 0.3.18 | LLM orchestration |
+| langchain-community | 0.3.17 | Community integrations |
+| langchain-core | 0.3.34 | Core abstractions |
+| langchain-openai | latest | OpenAI integration |
+| langchain-text-splitters | 0.3.6 | Text chunking |
+| sentence-transformers | 3.4.1 | Embedding models |
+| tiktoken | 0.8.0 | Token counting |
+| cerebras-cloud-sdk | latest | Cerebras inference |
+
+#### Data Processing
+| Package | Version | Purpose |
+|---------|---------|---------|
+| pandas | latest | Data manipulation |
+| numpy | 2.2.5 | Numerical operations |
+| finqual | latest | Financial data |
+| datasets | latest | Dataset handling |
+
+#### Utilities
+| Package | Version | Purpose |
+|---------|---------|---------|
+| pydantic | 2.10.6 | Data validation |
+| pydantic-settings | 2.7.1 | Settings management |
+| httpx | latest | Async HTTP client |
+| websockets | 15.0.1 | WebSocket support |
+| aiofiles | 24.1.0 | Async file I/O |
+| tavily | 1.1.0 | Web search |
+| tenacity | 9.0.0 | Retry logic |
+| logfire[fastapi,asyncpg] | latest | Observability |
+| python-multipart | latest | Form data |
+| python-dotenv | latest | Environment variables |
+| email-validator | latest | Email validation |
+
 ## API Documentation
 
 - Swagger UI: `http://localhost:8000/docs`
@@ -91,28 +198,22 @@ All downloaded data is stored in `agent/rag/data_downloads/` (gitignored):
 
 See `agent/rag/data_ingestion/README.md` for detailed ingestion instructions.
 
-## Project Structure
+## AI Agent Documentation
 
-```
-stratalens_ai/
-├── agent/                  # AI agent logic and RAG system
-│   ├── rag/               # RAG implementation
-│   └── screener/          # Financial screener
-├── routers/               # FastAPI route handlers
-├── frontend/              # Web interface
-├── experiments/           # Development and benchmarking (gitignored)
-└── utils/                 # Database and utility functions
-```
+For detailed documentation on the AI agent architecture and RAG system, see:
+
+- **[agent/README.md](agent/README.md)** - Complete agent architecture, RAG pipeline, self-reflection system, and usage examples
+- **[agent/rag/data_ingestion/README.md](agent/rag/data_ingestion/README.md)** - Data ingestion scripts for transcripts, embeddings, and SEC filings
 
 ## Development Status
 
 **Production (stratalens.ai):**
 - Earnings transcript chat with RAG
+- SEC 10-K filings (2024-25)
 - Real-time streaming responses
 - User authentication
 
 **In Development:**
-- SEC 10-K filings integration
 - Enhanced financial screener
 - Performance optimizations
 
@@ -127,4 +228,3 @@ MIT License - see LICENSE file for details
 ## Contact
 
 For questions or access requests: hrishi@stratalens.ai
-

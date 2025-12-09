@@ -1,6 +1,33 @@
 # Agent System
 
-Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **self-reflection** for financial Q&A over earnings transcripts. This is what runs the chat and analysis features on stratalens.ai.
+Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **self-reflection** for financial Q&A over earnings transcripts and SEC 10-K filings. This is what runs the chat and analysis features on stratalens.ai.
+
+## File Structure
+
+```
+agent/
+├── agent.py                    # Main entry point - Agent class
+├── agent_config.py             # Agent configuration (iterations, thresholds)
+├── prompts.py                  # Centralized LLM prompt templates
+├── screener_agent.py           # Financial screener (text-to-SQL)
+│
+├── rag/                        # RAG implementation
+│   ├── rag_agent.py            # Orchestration engine & iteration loop
+│   ├── question_analyzer.py    # Query parsing (tickers, quarters, intent)
+│   ├── search_engine.py        # Hybrid search (vector + keyword)
+│   ├── response_generator.py   # LLM response & evaluation
+│   ├── database_manager.py     # PostgreSQL/pgvector operations
+│   ├── conversation_memory.py  # Multi-turn conversation state
+│   ├── transcript_service.py   # Transcript metadata
+│   ├── sec_filings_service.py  # SEC 10-K retrieval
+│   ├── tavily_service.py       # Web search augmentation
+│   ├── config.py               # RAG configuration
+│   ├── rag_utils.py            # Utility functions
+│   └── data_ingestion/         # Data pipeline → see data_ingestion/README.md
+│
+└── screener/                   # Financial screener
+    └── metadata.py             # Screener metadata
+```
 
 ## Overview
 
@@ -143,11 +170,134 @@ User Question
 - **Latency**: ~10-20s (3-4x slower)
 - **Behavior**: Question → Retrieve → Generate → Evaluate → (if needed) Refine Query → Retrieve → Generate → Answer
 
-Self-reflection in agent mode:
-- Quality scoring on completeness, accuracy, clarity, specificity
-- Gap identification in generated answers
-- Follow-up query generation to retrieve missing information
-- Iterative refinement until confidence threshold met or max iterations hit
+#### Self-Reflection Loop
+
+The agent mode implements an iterative self-improvement loop:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ITERATION LOOP                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐                                           │
+│  │ Generate Answer  │ ◄─────────────────────────────────┐       │
+│  └────────┬─────────┘                                   │       │
+│           │                                              │       │
+│           ▼                                              │       │
+│  ┌──────────────────┐                                   │       │
+│  │ Evaluate Quality │                                   │       │
+│  │ • completeness   │                                   │       │
+│  │ • accuracy       │                                   │       │
+│  │ • clarity        │                                   │       │
+│  │ • specificity    │                                   │       │
+│  └────────┬─────────┘                                   │       │
+│           │                                              │       │
+│           ▼                                              │       │
+│  ┌──────────────────┐      YES    ┌─────────────────┐   │       │
+│  │ Should Iterate?  │ ──────────► │ Generate        │   │       │
+│  │ (confidence<0.9) │             │ Follow-up       │ ──┘       │
+│  └────────┬─────────┘             │ Questions       │           │
+│           │ NO                    └─────────────────┘           │
+│           ▼                                                      │
+│  ┌──────────────────┐                                           │
+│  │   Final Answer   │                                           │
+│  └──────────────────┘                                           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Stopping Conditions:**
+1. Confidence score ≥ 90% threshold
+2. Agent determines answer is sufficient (`should_iterate=false`)
+3. Max iterations reached
+4. No follow-up questions generated
+
+**Evaluation Criteria:**
+- `completeness_score` (0-10): Does the answer fully address the question?
+- `accuracy_score` (0-10): Is the information factually correct based on context?
+- `clarity_score` (0-10): Is the answer well-structured and easy to understand?
+- `specificity_score` (0-10): Does it include specific numbers, dates, quotes?
+- `overall_confidence` (0-1): Weighted combination used for iteration decisions
+
+**Follow-up Question Generation:**
+When the agent decides to iterate, it generates targeted follow-up questions to:
+- Fill gaps in the current answer
+- Retrieve missing financial data
+- Get additional context from different quarters
+- Clarify ambiguous information
+
+## Data Processing & Chunking
+
+### Earnings Transcripts
+
+Transcripts are processed with character-based chunking:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `chunk_size` | 1000 chars | Size of each text chunk |
+| `chunk_overlap` | 200 chars | Overlap between consecutive chunks |
+| `embedding_model` | all-MiniLM-L6-v2 | Sentence transformer for embeddings |
+
+**Storage:** PostgreSQL with pgvector extension
+- Table: `transcript_chunks`
+- Columns: `chunk_text`, `embedding` (vector), `ticker`, `year`, `quarter`, `metadata`
+
+### SEC 10-K Filings
+
+10-K filings are processed with hierarchical chunking that preserves document structure:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `chunk_size` | 1000 chars | Size of each text chunk |
+| `chunk_overlap` | 200 chars | Overlap between chunks |
+| `chunk_type` | text/table | Type of content |
+
+**Storage:**
+- Table: `ten_k_chunks` - Text chunks with embeddings
+- Table: `ten_k_tables` - Extracted tables with structured data (JSONB)
+
+**Chunk Metadata:**
+- `sec_section` - SEC section identifier (e.g., "item1", "item7", "item8")
+- `sec_section_title` - Human-readable section title
+- `path_string` - Hierarchical path in document
+- `chunk_type` - Content type (text, table, heading)
+- `is_financial_statement` - Boolean flag for core financial tables
+- `statement_type` - Type: `income_statement`, `balance_sheet`, `cash_flow`
+
+#### LLM-Based Table Selection
+
+For 10-K queries, tables are selected using an LLM (Cerebras) rather than just vector similarity:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   10-K Table Selection Flow                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. Fetch all tables for ticker from ten_k_tables               │
+│                         │                                        │
+│                         ▼                                        │
+│  2. Prioritize core financial statements:                       │
+│     • Income Statement (revenue, profit, expenses)              │
+│     • Balance Sheet (assets, liabilities, equity)               │
+│     • Cash Flow Statement (cash flows, capex)                   │
+│                         │                                        │
+│                         ▼                                        │
+│  3. LLM analyzes question and selects relevant tables           │
+│     • Deep question analysis (metrics, timeframes)              │
+│     • Systematic table evaluation (relevance scoring)           │
+│     • Quality over quantity (2-3 highly relevant > 10 loose)    │
+│                         │                                        │
+│                         ▼                                        │
+│  4. Selected tables + text chunks combined for response         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Table Selection Criteria:**
+- Financial metrics → Core financial statements prioritized
+- Segment data → Segment reporting tables
+- Specific notes → Exact note tables (e.g., "NOTE 13. EARNINGS PER SHARE")
+- Ratios → Multiple related tables for calculation
 
 ## Key Features
 
