@@ -361,8 +361,7 @@ async def stream_chat_message_v2(
                 logger.error(f"Error during chat streaming: {e}", exc_info=True)
                 error_event = {
                     'type': 'error',
-                    'message': 'An error occurred during processing.',
-                    'error': str(e)
+                    'message': 'Sorry, an error occurred while processing your request. Please try again.'
                 }
                 yield f"data: {json.dumps(error_event)}\n\n"
                 
@@ -626,11 +625,10 @@ async def stream_landing_demo_message_v2(
                 logger.error(f"Error during demo streaming: {e}", exc_info=True)
                 error_event = {
                     'type': 'error',
-                    'message': 'An error occurred during processing.',
-                    'error': str(e)
+                    'message': 'Sorry, an error occurred while processing your request. Please try again.'
                 }
                 yield f"data: {json.dumps(error_event)}\n\n"
-                
+
                 # Log failed analytics
                 try:
                     client_ip = request.client.host if request.client else "unknown"
