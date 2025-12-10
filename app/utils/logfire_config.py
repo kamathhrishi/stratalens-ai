@@ -97,9 +97,10 @@ def instrument_all():
 
     try:
         # Instrument OpenAI for LLM call tracking (tokens, costs, latency)
+        # capture_all=True enables full prompt/completion logging
         # This captures: prompts, completions, token usage, latency, errors
-        logfire.instrument_openai()
-        logger.info("✅ Instrumented OpenAI (LLM calls, tokens, costs)")
+        logfire.instrument_openai(capture_all=True)
+        logger.info("✅ Instrumented OpenAI (LLM calls with full prompts/completions)")
     except Exception as e:
         logger.warning(f"⚠️ Could not instrument OpenAI: {e}")
 
