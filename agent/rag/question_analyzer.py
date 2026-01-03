@@ -301,12 +301,14 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                 start_time = time.time()
                 cerebras_model = self.config.get("cerebras_model", "qwen-3-235b-a22b-instruct-2507")
 
-                # Log to Logfire with span for observability
+                # Log to Logfire with span for observability (full prompts)
                 if LOGFIRE_AVAILABLE and logfire:
                     with logfire.span(
                         "cerebras.question_analysis",
                         model=cerebras_model,
-                        question_preview=question[:200],
+                        question=question,
+                        system_prompt=system_message,
+                        user_prompt=analysis_prompt,
                         has_conversation_context=has_conversation_context,
                         attempt=attempt + 1,
                         max_retries=max_retries
@@ -322,11 +324,12 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                         )
                         call_time = time.time() - start_time
 
-                        # Log completion details
+                        # Log completion details with full response
                         logfire.info(
                             "cerebras.question_analysis.completion",
                             model=cerebras_model,
                             duration_seconds=call_time,
+                            response=response.choices[0].message.content if response.choices else None,
                             prompt_tokens=response.usage.prompt_tokens if response.usage else None,
                             completion_tokens=response.usage.completion_tokens if response.usage else None,
                             total_tokens=response.usage.total_tokens if response.usage else None

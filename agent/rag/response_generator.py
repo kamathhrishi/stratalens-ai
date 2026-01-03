@@ -111,14 +111,14 @@ class ResponseGenerator:
         temperature = temperature if temperature is not None else self.config.get("cerebras_temperature", 0.1)
         max_tokens = max_tokens or self.config.get("cerebras_max_tokens", 8000)
 
-        # Extract prompt info for logging
+        # Extract prompt info for logging (full content for Logfire)
         system_prompt = None
         user_prompt = None
         for msg in messages:
             if msg.get('role') == 'system':
-                system_prompt = msg.get('content', '')[:500]  # First 500 chars
+                system_prompt = msg.get('content', '')
             elif msg.get('role') == 'user':
-                user_prompt = msg.get('content', '')[:500]  # First 500 chars
+                user_prompt = msg.get('content', '')
 
         try:
             rag_logger.info(f"🤖 Cerebras API call: model={model}, temp={temperature}, max_tokens={max_tokens}")
@@ -131,8 +131,9 @@ class ResponseGenerator:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=stream,
-                    system_prompt_preview=system_prompt,
-                    user_prompt_preview=user_prompt,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    messages=messages,
                     message_count=len(messages)
                 ):
                     completion = self.cerebras_client.chat.completions.create(
@@ -152,13 +153,13 @@ class ResponseGenerator:
                         content = completion.choices[0].message.content
                         finish_reason = getattr(completion.choices[0], 'finish_reason', None)
 
-                        # Log completion details to Logfire
+                        # Log completion details to Logfire (full response)
                         logfire.info(
                             "cerebras.completion",
                             model=model,
                             finish_reason=finish_reason,
                             response_length=len(content) if content else 0,
-                            response_preview=content[:500] if content else None,
+                            response=content,
                             usage_prompt_tokens=getattr(completion.usage, 'prompt_tokens', None) if hasattr(completion, 'usage') else None,
                             usage_completion_tokens=getattr(completion.usage, 'completion_tokens', None) if hasattr(completion, 'usage') else None
                         )
