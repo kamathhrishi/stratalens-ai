@@ -828,10 +828,10 @@ Provide a natural, professional response in **markdown format** based on the tra
                     answer_length=len(answer),
                     generation_time_ms=int(generation_time * 1000),
                     tokens_used=response.usage.total_tokens if response and response.usage else None,
-                    # Capture full prompt and answer for debugging (truncate to avoid huge logs)
-                    prompt=prompt[:10000] if prompt else None,
-                    answer=answer[:10000] if answer else None,
-                    context_preview=context[:2000] if context else None
+                    # Capture full prompt and answer for debugging
+                    prompt=prompt if prompt else None,
+                    answer=answer if answer else None,
+                    context=context if context else None
                 )
 
             if return_details:
@@ -1595,12 +1595,12 @@ IMPORTANT: NEVER use the word "chunks" in your response. Use phrases like "earni
         """
         eval_start = time.time()
 
-        # Log evaluation start to Logfire with question and answer for tracing
+        # Log evaluation start to Logfire with full question and answer
         if LOGFIRE_AVAILABLE and logfire:
             logfire.info(
                 "llm.evaluation.start",
                 question=original_question,
-                answer_preview=answer[:3000] if answer else None,
+                answer=answer if answer else None,
                 question_length=len(original_question),
                 answer_length=len(answer),
                 context_chunks_count=len(context_chunks),
