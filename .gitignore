@@ -115,5 +115,3 @@ agent/rag/sec_filings_rag_scr/
 # All experiments (benchmarks, evaluation, testing)
 experiments/
 
-# Documentation (auto-generated)
-docs/
