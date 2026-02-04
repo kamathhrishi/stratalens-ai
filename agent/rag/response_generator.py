@@ -525,7 +525,7 @@ class ResponseGenerator:
     # STAGE 2: SINGLE-TICKER RESPONSE GENERATION
     # ═════════════════════════════════════════════════════════════════════
 
-    def generate_openai_response(self, question: str, context_chunks: List[str], chunk_objects: List[Dict[str, Any]] = None, return_details: bool = False, ticker: str = None, year: int = None, quarter: int = None, stream_callback=None, news_context: str = None, ten_k_context: str = None, previous_answer: str = None) -> str:
+    def generate_openai_response(self, question: str, context_chunks: List[str], chunk_objects: List[Dict[str, Any]] = None, return_details: bool = False, ticker: str = None, year: int = None, quarter: int = None, stream_callback=None, news_context: str = None, ten_k_context: str = None, previous_answer: str = None, retry_callback=None) -> str:
         """Generate response using OpenAI API based only on retrieved chunks with citations.
 
         If multiple quarters are detected, automatically uses parallel quarter processing
@@ -571,7 +571,7 @@ class ResponseGenerator:
                     try:
                         return new_loop.run_until_complete(
                             self.generate_openai_response_parallel_quarters(
-                                question, chunk_objects, ticker, stream_callback
+                                question, chunk_objects, ticker, stream_callback, retry_callback
                             )
                         )
                     finally:
@@ -870,13 +870,30 @@ Write a professional equity research report in **markdown format**. Be thorough,
                                 technical_message=str(api_error),
                                 retryable=is_transient
                             )
-                        wait_seconds = attempt * 2  # Exponential backoff
+                        # Longer backoff: 5s, 10s, 15s instead of 2s, 4s, 6s
+                        wait_seconds = 5 + (attempt * 5)
                         rag_logger.warning(
                             f"⚠️ Streaming API rate limit / queue error, retrying attempt {attempt}/{max_attempts} "
                             f"in {wait_seconds}s: {api_error}"
                         )
+                        # Notify frontend about retry if callback provided
+                        if retry_callback:
+                            try:
+                                retry_callback({
+                                    'type': 'api_retry',
+                                    'message': f'AI service busy, retrying in {wait_seconds}s...',
+                                    'step': 'generation',
+                                    'data': {
+                                        'attempt': attempt,
+                                        'max_attempts': max_attempts,
+                                        'wait_seconds': wait_seconds,
+                                        'provider': 'Cerebras' if use_cerebras else 'OpenAI'
+                                    }
+                                })
+                            except Exception as cb_error:
+                                rag_logger.warning(f"⚠️ Retry callback failed: {cb_error}")
                         time.sleep(wait_seconds)
-                
+
                 chunk_count = 0
                 content_chunk_count = 0
                 try:
@@ -953,11 +970,28 @@ Write a professional equity research report in **markdown format**. Be thorough,
                                     technical_message=str(api_error),
                                     retryable=is_transient
                                 )
-                            wait_seconds = attempt * 2
+                            # Longer backoff: 5s, 10s, 15s instead of 2s, 4s, 6s
+                            wait_seconds = 5 + (attempt * 5)
                             rag_logger.warning(
                                 f"⚠️ Non-streaming fallback rate limit / queue error, retrying attempt "
                                 f"{attempt}/{max_attempts} in {wait_seconds}s: {api_error}"
                             )
+                            # Notify frontend about retry if callback provided
+                            if retry_callback:
+                                try:
+                                    retry_callback({
+                                        'type': 'api_retry',
+                                        'message': f'AI service busy, retrying in {wait_seconds}s...',
+                                        'step': 'generation',
+                                        'data': {
+                                            'attempt': attempt,
+                                            'max_attempts': max_attempts,
+                                            'wait_seconds': wait_seconds,
+                                            'provider': 'Cerebras' if use_cerebras else 'OpenAI'
+                                        }
+                                    })
+                                except Exception as cb_error:
+                                    rag_logger.warning(f"⚠️ Retry callback failed: {cb_error}")
                             time.sleep(wait_seconds)
                     call_time = time.time() - start_time
                     answer = response.choices[0].message.content.strip()
@@ -1026,11 +1060,28 @@ Write a professional equity research report in **markdown format**. Be thorough,
                                 technical_message=str(api_error),
                                 retryable=is_transient
                             )
-                        wait_seconds = attempt * 2
+                        # Longer backoff: 5s, 10s, 15s instead of 2s, 4s, 6s
+                        wait_seconds = 5 + (attempt * 5)
                         rag_logger.warning(
                             f"⚠️ Non-streaming rate limit / queue error, retrying attempt "
                             f"{attempt}/{max_attempts} in {wait_seconds}s: {api_error}"
                         )
+                        # Notify frontend about retry if callback provided
+                        if retry_callback:
+                            try:
+                                retry_callback({
+                                    'type': 'api_retry',
+                                    'message': f'AI service busy, retrying in {wait_seconds}s...',
+                                    'step': 'generation',
+                                    'data': {
+                                        'attempt': attempt,
+                                        'max_attempts': max_attempts,
+                                        'wait_seconds': wait_seconds,
+                                        'provider': provider
+                                    }
+                                })
+                            except Exception as cb_error:
+                                rag_logger.warning(f"⚠️ Retry callback failed: {cb_error}")
                         time.sleep(wait_seconds)
                 call_time = time.time() - start_time
                 rag_logger.info(f"✅ ===== RESPONSE GENERATION LLM RESPONSE ===== (call time: {call_time:.3f}s)")
@@ -1093,7 +1144,7 @@ Write a professional equity research report in **markdown format**. Be thorough,
     # STAGE 3: MULTI-TICKER RESPONSE GENERATION
     # ═════════════════════════════════════════════════════════════════════
 
-    def generate_multi_ticker_response(self, question: str, all_chunks: List[Dict[str, Any]], individual_results: List[Dict[str, Any]], show_details: bool = False, comprehensive: bool = True, stream_callback=None, news_context: str = None, ten_k_context: str = None, previous_answer: str = None) -> str:
+    def generate_multi_ticker_response(self, question: str, all_chunks: List[Dict[str, Any]], individual_results: List[Dict[str, Any]], show_details: bool = False, comprehensive: bool = True, stream_callback=None, news_context: str = None, ten_k_context: str = None, previous_answer: str = None, retry_callback=None) -> str:
         """Generate response using all chunks with company labels for multi-ticker questions."""
         rag_logger.info(f"🤖 Generating multi-ticker response using {len(all_chunks)} chunks with company labels")
         
@@ -1314,11 +1365,28 @@ Provide a professional, evidence-based analysis in **markdown format**."""
                                 technical_message=str(api_error),
                                 retryable=is_transient
                             )
-                        wait_seconds = attempt * 2
+                        # Longer backoff: 5s, 10s, 15s instead of 2s, 4s, 6s
+                        wait_seconds = 5 + (attempt * 5)
                         rag_logger.warning(
                             f"⚠️ Multi-ticker streaming rate limit / queue error, retrying attempt "
                             f"{attempt}/{max_attempts} in {wait_seconds}s: {api_error}"
                         )
+                        # Notify frontend about retry if callback provided
+                        if retry_callback:
+                            try:
+                                retry_callback({
+                                    'type': 'api_retry',
+                                    'message': f'AI service busy, retrying in {wait_seconds}s...',
+                                    'step': 'generation',
+                                    'data': {
+                                        'attempt': attempt,
+                                        'max_attempts': max_attempts,
+                                        'wait_seconds': wait_seconds,
+                                        'provider': 'Cerebras' if use_cerebras else 'OpenAI'
+                                    }
+                                })
+                            except Exception as cb_error:
+                                rag_logger.warning(f"⚠️ Retry callback failed: {cb_error}")
                         time.sleep(wait_seconds)
 
                 chunk_count = 0
@@ -1392,11 +1460,28 @@ Provide a professional, evidence-based analysis in **markdown format**."""
                                     technical_message=str(api_error),
                                     retryable=is_transient
                                 )
-                            wait_seconds = attempt * 2
+                            # Longer backoff: 5s, 10s, 15s instead of 2s, 4s, 6s
+                            wait_seconds = 5 + (attempt * 5)
                             rag_logger.warning(
                                 f"⚠️ Multi-ticker non-streaming fallback rate limit / queue error, retrying attempt "
                                 f"{attempt}/{max_attempts} in {wait_seconds}s: {api_error}"
                             )
+                            # Notify frontend about retry if callback provided
+                            if retry_callback:
+                                try:
+                                    retry_callback({
+                                        'type': 'api_retry',
+                                        'message': f'AI service busy, retrying in {wait_seconds}s...',
+                                        'step': 'generation',
+                                        'data': {
+                                            'attempt': attempt,
+                                            'max_attempts': max_attempts,
+                                            'wait_seconds': wait_seconds,
+                                            'provider': 'Cerebras' if use_cerebras else 'OpenAI'
+                                        }
+                                    })
+                                except Exception as cb_error:
+                                    rag_logger.warning(f"⚠️ Retry callback failed: {cb_error}")
                             time.sleep(wait_seconds)
                     call_time = time.time() - start_time
                     answer = response.choices[0].message.content.strip()
@@ -1462,11 +1547,28 @@ Provide a professional, evidence-based analysis in **markdown format**."""
                                 technical_message=str(api_error),
                                 retryable=is_transient
                             )
-                        wait_seconds = attempt * 2
+                        # Longer backoff: 5s, 10s, 15s instead of 2s, 4s, 6s
+                        wait_seconds = 5 + (attempt * 5)
                         rag_logger.warning(
                             f"⚠️ Multi-ticker non-streaming rate limit / queue error, retrying attempt "
                             f"{attempt}/{max_attempts} in {wait_seconds}s: {api_error}"
                         )
+                        # Notify frontend about retry if callback provided
+                        if retry_callback:
+                            try:
+                                retry_callback({
+                                    'type': 'api_retry',
+                                    'message': f'AI service busy, retrying in {wait_seconds}s...',
+                                    'step': 'generation',
+                                    'data': {
+                                        'attempt': attempt,
+                                        'max_attempts': max_attempts,
+                                        'wait_seconds': wait_seconds,
+                                        'provider': provider
+                                    }
+                                })
+                            except Exception as cb_error:
+                                rag_logger.warning(f"⚠️ Retry callback failed: {cb_error}")
                         time.sleep(wait_seconds)
 
                 call_time = time.time() - start_time
@@ -1517,16 +1619,17 @@ Provide a professional, evidence-based analysis in **markdown format**."""
         rag_logger.info(f"📊 Grouped {len(chunk_objects)} chunks into {len(quarters_map)} quarters: {list(quarters_map.keys())}")
         return dict(quarters_map)
     
-    async def _generate_quarter_response(self, question: str, quarter_id: str, quarter_chunks: List[Dict[str, Any]], 
-                                        ticker: str = None) -> Dict[str, Any]:
+    async def _generate_quarter_response(self, question: str, quarter_id: str, quarter_chunks: List[Dict[str, Any]],
+                                        ticker: str = None, retry_callback=None) -> Dict[str, Any]:
         """Generate response for a single quarter (runs in parallel with other quarters).
-        
+
         Args:
             question: User's question
             quarter_id: Quarter identifier (e.g., '2025_q1')
             quarter_chunks: Chunks for this specific quarter
             ticker: Company ticker symbol
-            
+            retry_callback: Optional callback for retry notifications
+
         Returns:
             Dict with quarter_id, answer, and metadata
         """
@@ -1535,26 +1638,29 @@ Provide a professional, evidence-based analysis in **markdown format**."""
             year, quarter = quarter_id.split('_q')
             year = int(year)
             quarter = int(quarter)
-            
+
             # Prepare context for this quarter
             context_chunks = [chunk['chunk_text'] for chunk in quarter_chunks]
-            
+
             rag_logger.info(f"🔄 Generating response for {quarter_id} with {len(context_chunks)} chunks")
-            
+
             # Run synchronous response generation in thread pool
+            # Use functools.partial to pass keyword arguments through run_in_executor
+            from functools import partial
             loop = asyncio.get_event_loop()
-            answer = await loop.run_in_executor(
-                None,  # Uses default thread pool
+            gen_func = partial(
                 self.generate_openai_response,
-                question,
-                context_chunks,
-                quarter_chunks,
-                False,  # return_details
-                ticker,
-                year,
-                quarter,
-                None  # stream_callback (no streaming for parallel processing)
+                question=question,
+                context_chunks=context_chunks,
+                chunk_objects=quarter_chunks,
+                return_details=False,
+                ticker=ticker,
+                year=year,
+                quarter=quarter,
+                stream_callback=None,  # No streaming for parallel processing
+                retry_callback=retry_callback
             )
+            answer = await loop.run_in_executor(None, gen_func)
             
             rag_logger.info(f"✅ Generated response for {quarter_id}: {len(answer)} characters")
             
@@ -1569,21 +1675,32 @@ Provide a professional, evidence-based analysis in **markdown format**."""
             
         except Exception as e:
             rag_logger.error(f"❌ Error generating response for {quarter_id}: {e}")
+            # Parse year and quarter even for error responses to ensure consistent structure
+            try:
+                year, quarter = quarter_id.split('_q')
+                year = int(year)
+                quarter = int(quarter)
+            except:
+                year = 0
+                quarter = 0
             return {
                 'quarter_id': quarter_id,
+                'year': year,
+                'quarter': quarter,
                 'answer': f"Error processing {quarter_id}: {str(e)}",
                 'chunks': quarter_chunks,
+                'chunk_count': len(quarter_chunks),
                 'error': str(e)
             }
     
-    async def generate_openai_response_parallel_quarters(self, question: str, chunk_objects: List[Dict[str, Any]], 
-                                                         ticker: str = None, stream_callback=None) -> str:
+    async def generate_openai_response_parallel_quarters(self, question: str, chunk_objects: List[Dict[str, Any]],
+                                                         ticker: str = None, stream_callback=None, retry_callback=None) -> str:
         """Generate responses for each quarter in parallel, then combine them.
-        
+
         This method is used when multiple quarters are detected in the query.
         It processes each quarter independently in parallel, then intelligently
         combines all quarter responses into a comprehensive final answer.
-        
+
         Args:
             question: User's question
             chunk_objects: List of chunk dictionaries with metadata
@@ -1619,10 +1736,10 @@ Provide a professional, evidence-based analysis in **markdown format**."""
         
         # Process each quarter in parallel
         rag_logger.info(f"⚡ Processing {len(quarters_map)} quarters in parallel")
-        
+
         tasks = []
         for quarter_id, quarter_chunks in quarters_map.items():
-            task = self._generate_quarter_response(question, quarter_id, quarter_chunks, ticker)
+            task = self._generate_quarter_response(question, quarter_id, quarter_chunks, ticker, retry_callback)
             tasks.append(task)
         
         # Wait for all quarters to complete
@@ -1662,9 +1779,32 @@ Provide a professional, evidence-based analysis in **markdown format**."""
         """
         rag_logger.info(f"🔄 Combining {len(quarter_responses)} quarter responses into final answer")
 
+        # Filter out failed responses and log them
+        successful_responses = []
+        failed_responses = []
+        for qr in quarter_responses:
+            if qr.get('error'):
+                failed_responses.append(qr)
+                rag_logger.warning(f"⚠️ Skipping failed quarter {qr.get('quarter_id', 'unknown')}: {qr.get('error')}")
+            else:
+                successful_responses.append(qr)
+
+        # If all responses failed, raise an error
+        if not successful_responses:
+            error_msg = "All quarter API calls failed. The AI service may be experiencing high traffic."
+            rag_logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
+
+        # Log if some responses failed
+        if failed_responses:
+            rag_logger.warning(f"⚠️ {len(failed_responses)} of {len(quarter_responses)} quarter(s) failed, proceeding with {len(successful_responses)} successful")
+
+        # Use only successful responses for synthesis
+        quarter_responses = successful_responses
+
         # Prepare context with all quarter responses
         company_name = ticker if ticker else "the company"
-        quarters_human = [f"Q{qr['quarter']} {qr['year']}" for qr in quarter_responses]
+        quarters_human = [f"Q{qr.get('quarter', '?')} {qr.get('year', '?')}" for qr in quarter_responses]
 
         # Get synthesis prompt from centralized prompts
         prompt = get_quarter_synthesis_prompt(question, quarter_responses, company_name, quarters_human)

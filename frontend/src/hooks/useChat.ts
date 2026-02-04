@@ -251,6 +251,7 @@ export function useChat(): UseChatReturn {
         case '10k_planning':
         case '10k_retrieval':
         case '10k_evaluation':
+        case 'api_retry':
           if (event.message) {
             const newStep: ReasoningStep = {
               message: event.message,

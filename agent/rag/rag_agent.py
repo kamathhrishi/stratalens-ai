@@ -1224,22 +1224,41 @@ class RAGAgent:
         accumulated_citations = all_citations.copy()
         evaluation_context = []
         follow_up_questions_asked = []
-        
+
+        # Create sync retry callback that queues events for the async event_yielder
+        # This allows the response generator to notify the frontend about retries
+        retry_event_queue = []
+
+        def sync_retry_callback(event):
+            """Sync callback that collects retry events for later async yielding"""
+            retry_event_queue.append(event)
+            # Also log for visibility
+            rag_logger.info(f"🔄 Retry event queued: {event.get('message', 'unknown')}")
+
+        async def flush_retry_events():
+            """Yield any queued retry events to the frontend"""
+            if event_yielder and retry_event_queue:
+                for event in retry_event_queue:
+                    await event_yielder(event)
+                retry_event_queue.clear()
+
         # Generate initial answer (NO streaming for initial - we'll stream the final answer only)
         print(f"🤖 Generating initial answer for evaluation")
         if is_general_question:
             initial_answer = self.response_generator.generate_multi_ticker_response(
-                question, accumulated_chunks, individual_results, show_details, comprehensive, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context
+                question, accumulated_chunks, individual_results, show_details, comprehensive, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, retry_callback=sync_retry_callback
             )
         elif is_multi_ticker and len(individual_results) > 1:
             initial_answer = self.response_generator.generate_multi_ticker_response(
-                question, accumulated_chunks, individual_results, show_details, comprehensive, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context
+                question, accumulated_chunks, individual_results, show_details, comprehensive, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, retry_callback=sync_retry_callback
             )
         else:
             initial_answer = self.response_generator.generate_openai_response(
                 question, [chunk['chunk_text'] for chunk in accumulated_chunks], accumulated_chunks,
-                ticker=tickers_to_process[0] if tickers_to_process else None, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context
+                ticker=tickers_to_process[0] if tickers_to_process else None, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, retry_callback=sync_retry_callback
             )
+        # Flush any retry events that occurred during initial answer generation
+        await flush_retry_events()
         
         best_answer = initial_answer
         best_confidence = 0.0
@@ -1309,25 +1328,43 @@ class RAGAgent:
             # Pass data_source to respect routing (don't search transcripts if user asked for 10k only)
             current_data_source = question_analysis.get('data_source', 'earnings_transcripts') if question_analysis else 'earnings_transcripts'
 
-            if answer_quality['is_insufficient']:
-                evaluation = await self.response_generator.evaluate_answer_quality(
-                    question, best_answer, [chunk['chunk_text'] for chunk in accumulated_chunks], accumulated_chunks,
-                    conversation_memory=conversation_memory, conversation_id=conversation_id_for_eval,
-                    follow_up_questions_asked=follow_up_questions_asked,
-                    evaluation_context=evaluation_context,
-                    reasoning_context=reasoning_context,
-                    data_source=current_data_source
-                )
-            else:
-                evaluation = await self.response_generator.evaluate_answer_quality(
-                    question, best_answer, [chunk['chunk_text'] for chunk in accumulated_chunks],
-                    conversation_memory=conversation_memory, conversation_id=conversation_id_for_eval,
-                    follow_up_questions_asked=follow_up_questions_asked,
-                    evaluation_context=evaluation_context,
-                    reasoning_context=reasoning_context,
-                    data_source=current_data_source
-                )
-            
+            # Wrap evaluation in try-except to gracefully handle LLM API errors
+            # If evaluation fails but we have an answer, return what we have instead of crashing
+            try:
+                if answer_quality['is_insufficient']:
+                    evaluation = await self.response_generator.evaluate_answer_quality(
+                        question, best_answer, [chunk['chunk_text'] for chunk in accumulated_chunks], accumulated_chunks,
+                        conversation_memory=conversation_memory, conversation_id=conversation_id_for_eval,
+                        follow_up_questions_asked=follow_up_questions_asked,
+                        evaluation_context=evaluation_context,
+                        reasoning_context=reasoning_context,
+                        data_source=current_data_source
+                    )
+                else:
+                    evaluation = await self.response_generator.evaluate_answer_quality(
+                        question, best_answer, [chunk['chunk_text'] for chunk in accumulated_chunks],
+                        conversation_memory=conversation_memory, conversation_id=conversation_id_for_eval,
+                        follow_up_questions_asked=follow_up_questions_asked,
+                        evaluation_context=evaluation_context,
+                        reasoning_context=reasoning_context,
+                        data_source=current_data_source
+                    )
+            except (openai.APIError, openai.APIConnectionError, openai.RateLimitError, openai.APIStatusError) as e:
+                # LLM API error during evaluation - if we have an answer, return it gracefully
+                rag_logger.warning(f"⚠️ LLM API error during evaluation at iteration {iteration + 1}: {e}")
+                if best_answer:
+                    rag_logger.info(f"✅ Returning existing answer (generated before API error)")
+                    if event_yielder:
+                        await event_yielder({
+                            'type': 'api_retry',
+                            'message': f'API error during evaluation, returning best answer so far',
+                            'step': 'iteration',
+                            'data': {'error': str(e), 'iteration': iteration + 1, 'graceful_fallback': True}
+                        })
+                    break  # Exit iteration loop and return what we have
+                else:
+                    raise  # No answer yet, propagate the error
+
             evaluation_confidence = evaluation.get('overall_confidence', 0.5)
             print(f"📊 Evaluation: confidence={evaluation_confidence:.3f}")
 
@@ -1646,20 +1683,37 @@ class RAGAgent:
                 # Regenerate answer using only NEW chunks from this iteration + previous answer
                 # The previous answer is a "compression" of all prior chunks, so we don't need to re-send them
                 # This is more token-efficient and ensures the LLM focuses on new information
-                if is_general_question or (is_multi_ticker and len(individual_results) > 1):
-                    refined_answer = self.response_generator.generate_multi_ticker_response(
-                        question, iteration_new_chunks, individual_results, show_details, comprehensive, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, previous_answer=best_answer
-                    )
-                else:
-                    refined_answer = self.response_generator.generate_openai_response(
-                        question, [chunk['chunk_text'] for chunk in iteration_new_chunks], iteration_new_chunks,
-                        ticker=tickers_to_process[0] if tickers_to_process else None, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, previous_answer=best_answer
-                    )
+                # Wrap in try-except to handle LLM API errors gracefully
+                try:
+                    if is_general_question or (is_multi_ticker and len(individual_results) > 1):
+                        refined_answer = self.response_generator.generate_multi_ticker_response(
+                            question, iteration_new_chunks, individual_results, show_details, comprehensive, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, previous_answer=best_answer, retry_callback=sync_retry_callback
+                        )
+                    else:
+                        refined_answer = self.response_generator.generate_openai_response(
+                            question, [chunk['chunk_text'] for chunk in iteration_new_chunks], iteration_new_chunks,
+                            ticker=tickers_to_process[0] if tickers_to_process else None, stream_callback=None, news_context=news_context, ten_k_context=ten_k_context, previous_answer=best_answer, retry_callback=sync_retry_callback
+                        )
+                    # Flush any retry events that occurred during refinement
+                    await flush_retry_events()
 
-                best_answer = refined_answer
-                best_citations = accumulated_citations.copy()
-                best_context_chunks = [chunk['chunk_text'] for chunk in accumulated_chunks]
-                best_chunks = accumulated_chunks.copy()
+                    best_answer = refined_answer
+                    best_citations = accumulated_citations.copy()
+                    best_context_chunks = [chunk['chunk_text'] for chunk in accumulated_chunks]
+                    best_chunks = accumulated_chunks.copy()
+                except (openai.APIError, openai.APIConnectionError, openai.RateLimitError, openai.APIStatusError) as e:
+                    # LLM API error during refinement - keep the existing answer and stop iterating
+                    rag_logger.warning(f"⚠️ LLM API error during answer refinement at iteration {iteration + 1}: {e}")
+                    rag_logger.info(f"✅ Keeping previous answer (before API error)")
+                    if event_yielder:
+                        await event_yielder({
+                            'type': 'api_retry',
+                            'message': f'API error during refinement, keeping previous answer',
+                            'step': 'iteration',
+                            'data': {'error': str(e), 'iteration': iteration + 1, 'graceful_fallback': True}
+                        })
+                    await flush_retry_events()
+                    break  # Exit iteration loop and return what we have
             else:
                 rag_logger.info(f"📝 No new chunks found in iteration {iteration + 1}, keeping previous answer")
         
@@ -1680,20 +1734,42 @@ class RAGAgent:
                     })
                     # Yield control to allow the final event to be sent before answer streaming starts
                     await asyncio.sleep(0.01)
-                
+
                 # Generate/regenerate with streaming enabled
-                if is_general_question or (is_multi_ticker and len(individual_results) > 1):
-                    final_answer = self.response_generator.generate_multi_ticker_response(
-                        question, accumulated_chunks, individual_results, show_details, comprehensive, stream_callback=stream_callback, news_context=news_context, ten_k_context=ten_k_context
-                    )
-                else:
-                    final_answer = self.response_generator.generate_openai_response(
-                        question, [chunk['chunk_text'] for chunk in accumulated_chunks], accumulated_chunks,
-                        ticker=tickers_to_process[0] if tickers_to_process else None, stream_callback=stream_callback, news_context=news_context, ten_k_context=ten_k_context
-                    )
-                
-                # Update with the generated/streamed version
-                best_answer = final_answer
+                # Wrap in try-except to handle LLM API errors gracefully
+                try:
+                    if is_general_question or (is_multi_ticker and len(individual_results) > 1):
+                        final_answer = self.response_generator.generate_multi_ticker_response(
+                            question, accumulated_chunks, individual_results, show_details, comprehensive, stream_callback=stream_callback, news_context=news_context, ten_k_context=ten_k_context, retry_callback=sync_retry_callback
+                        )
+                    else:
+                        final_answer = self.response_generator.generate_openai_response(
+                            question, [chunk['chunk_text'] for chunk in accumulated_chunks], accumulated_chunks,
+                            ticker=tickers_to_process[0] if tickers_to_process else None, stream_callback=stream_callback, news_context=news_context, ten_k_context=ten_k_context, retry_callback=sync_retry_callback
+                        )
+                    # Flush any retry events that occurred during final generation
+                    await flush_retry_events()
+
+                    # Update with the generated/streamed version
+                    best_answer = final_answer
+                except (openai.APIError, openai.APIConnectionError, openai.RateLimitError, openai.APIStatusError) as e:
+                    # LLM API error during final streaming - return existing answer if we have one
+                    rag_logger.warning(f"⚠️ LLM API error during final answer generation: {e}")
+                    await flush_retry_events()
+                    if best_answer:
+                        rag_logger.info(f"✅ Returning existing answer (generated before API error)")
+                        if event_yielder:
+                            await event_yielder({
+                                'type': 'api_retry',
+                                'message': f'API error during final generation, returning best answer',
+                                'step': 'final',
+                                'data': {'error': str(e), 'graceful_fallback': True}
+                            })
+                        # Stream the existing answer to the callback so the frontend receives it
+                        if stream_callback:
+                            stream_callback(best_answer)
+                    else:
+                        raise  # No answer at all, propagate the error
         
         generation_time = time.time() - generation_start
         print(f"\n⏱️  GENERATION PHASE COMPLETED in {generation_time:.3f}s")
@@ -2195,8 +2271,8 @@ class RAGAgent:
                                 elif event_type == 'planning_complete':
                                     sub_questions = event_data.get('sub_questions', [])
                                     if sub_questions:
-                                        # Format sub-questions as a thinking list
-                                        questions_text = "\n".join([f"• {q}" for q in sub_questions[:4]])
+                                        # Format sub-questions as a thinking list with dashes
+                                        questions_text = "\n".join([f"- {q}" for q in sub_questions[:4]])
                                         yield {
                                             'type': 'reasoning',
                                             'message': f"To answer this, I need to find:\n{questions_text}",

@@ -94,6 +94,7 @@ const exampleQueries = [
   "What is $NVDA's competitive moat in AI chips?",
   "Compare $MSFT and $GOOGL cloud segment growth",
   "$META AI capex commentary in last 3 quarters",
+  "Comment on $ORCL balance sheet and their usage of debt?",
 ]
 
 // Tech company tickers for the scrolling banner

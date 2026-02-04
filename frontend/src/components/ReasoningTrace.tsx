@@ -133,6 +133,24 @@ export default function ReasoningTrace({ steps, isStreaming }: ReasoningTracePro
                     ))}
                   </div>
                 </div>
+              ) : step.message.includes('\n') ? (
+                // Multi-line message (e.g., bullet point lists)
+                <div className="flex-1">
+                  {step.message.split('\n').map((line, lineIdx) => {
+                    const trimmedLine = line.trim()
+                    const isBullet = trimmedLine.startsWith('-') || trimmedLine.startsWith('•')
+                    const cleanLine = isBullet ? trimmedLine.substring(1).trim() : line
+                    return (
+                      <p
+                        key={lineIdx}
+                        className={`text-slate-500 text-sm leading-relaxed ${isBullet ? 'ml-2 flex items-start gap-1.5' : ''}`}
+                      >
+                        {isBullet && <span className="text-slate-400 flex-shrink-0">-</span>}
+                        <span>{cleanLine}</span>
+                      </p>
+                    )
+                  })}
+                </div>
               ) : (
                 // Regular step - lighter text for less prominence
                 <span className="text-slate-500 text-sm leading-relaxed">{step.message}</span>
