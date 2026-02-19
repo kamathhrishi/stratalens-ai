@@ -12,14 +12,6 @@ from app import app
 from config import settings
 from app.utils.logging_utils import log_info
 
-# Try to import analyzer to check availability
-try:
-    from agent.screener import FinancialDataAnalyzer
-    ANALYZER_AVAILABLE = True
-except ImportError:
-    ANALYZER_AVAILABLE = False
-
-
 if __name__ == "__main__":
     # Load environment variables from .env file if it exists
     load_dotenv()
@@ -38,7 +30,11 @@ if __name__ == "__main__":
     log_info("🚀 Starting StrataLens Enhanced API server...")
     log_info(f"🌐 Server will run on: http://localhost:{port}")
     log_info(f"📖 API Documentation: http://localhost:{port}/docs")
-    log_info(f"🧠 Financial Analysis Support: {'✅ Enabled' if ANALYZER_AVAILABLE else '❌ Disabled (analyzer not available)'}")
+    try:
+        from agent.screener import FinancialDataAnalyzer  # noqa: F401
+        log_info("🧠 Financial Analysis Support: ✅ Enabled")
+    except ImportError:
+        log_info("🧠 Financial Analysis Support: ❌ Disabled (analyzer not available)")
     
     uvicorn.run(
         "app:app",  # Use the app module
