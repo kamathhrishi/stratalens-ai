@@ -20,6 +20,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from agent.llm import get_llm, LLMClient
+from agent.rag.database_manager import DatabaseConnectionError
 
 try:
     from cerebras.cloud.sdk import Cerebras
@@ -291,13 +292,17 @@ class SearchPlanner:
         for ticker in tickers:
             # Get available quarters from database
             if self.database_manager:
-                quarters = self.database_manager.get_last_n_quarters_for_company(ticker, 50)
-                available_quarters[ticker] = quarters or []
+                try:
+                    quarters = self.database_manager.get_last_n_quarters_for_company(ticker, 50)
+                    available_quarters[ticker] = quarters or []
 
-                # Extract years from quarters for 10-K availability
-                years = list(set(int(q.split('_')[0]) for q in quarters if '_' in q))
-                years.sort(reverse=True)
-                available_10k_years[ticker] = years
+                    # Extract years from quarters for 10-K availability
+                    years = list(set(int(q.split('_')[0]) for q in quarters if '_' in q))
+                    years.sort(reverse=True)
+                    available_10k_years[ticker] = years
+                except DatabaseConnectionError:
+                    # Re-raise database connection errors - don't silently fail
+                    raise
             else:
                 available_quarters[ticker] = []
                 available_10k_years[ticker] = []

@@ -47,7 +47,7 @@ except ImportError:
 
 # Local: same package (agent.rag)
 from .config import Config
-from .database_manager import DatabaseManager
+from .database_manager import DatabaseManager, DatabaseConnectionError
 from .question_analyzer import QuestionAnalyzer
 from .reasoning_planner import ReasoningPlanner
 from .rag_flow_context import ImprovementState, RAGFlowContext
@@ -1735,6 +1735,18 @@ class RAGAgent:
                     news_searches=len(search_plan.news)
                 )
 
+        except DatabaseConnectionError as e:
+            # Database connection error - propagate to frontend as error event
+            rag_logger.error(f"❌ Database connection error during search planning: {e.technical_message}")
+            if ctx.stream:
+                yield {
+                    'type': 'error',
+                    'message': e.user_message,
+                    'step': 'search_planning',
+                    'event_name': 'search_planning_error'
+                }
+            # Re-raise to stop the flow
+            raise
         except Exception as e:
             rag_logger.error(f"❌ Search planning failed: {e}")
             # Create fallback empty search plan

@@ -26,6 +26,7 @@ from config import settings
 from app.utils import rate_limiter, RATE_LIMIT_PER_MONTH, record_successful_query_usage
 from agent import Agent as RAGSystem, create_agent as create_rag_system
 from agent.rag.llm_utils import LLMError, format_error_for_user
+from agent.rag.database_manager import DatabaseConnectionError
 from app.utils.logging_utils import log_info, log_error, log_warning
 from app.utils import create_error_response, raise_sanitized_http_exception
 from db.db_connection_utils import get_postgres_connection
@@ -403,6 +404,33 @@ async def stream_chat_message_v2(
                     )
                 except Exception as analytics_error:
                     logger.error(f"Failed to log failed analytics: {analytics_error}")
+            
+            except DatabaseConnectionError as e:
+                # Database connection error - use user-friendly message
+                logger.error(f"Database connection error during chat streaming: {e.technical_message}", exc_info=False)
+                error_event = {
+                    'type': 'error',
+                    'message': e.user_message
+                }
+                yield f"data: {json.dumps(error_event)}\n\n"
+
+                # Log failed analytics
+                try:
+                    await log_chat_analytics(
+                        db=stream_db,
+                        ip_address="unknown",
+                        user_type=UserType.AUTHORIZED,
+                        query_text=message,
+                        comprehensive_search=comprehensive,
+                        success=False,
+                        response_time_ms=0,
+                        citations_count=0,
+                        error_message=e.technical_message,
+                        user_id=user_id
+                    )
+                except Exception as analytics_error:
+                    logger.error(f"Failed to log failed analytics: {analytics_error}")
+            
             except Exception as e:
                 logger.error(f"Error during chat streaming: {e}", exc_info=True)
                 # Use format_error_for_user to get a user-friendly message
@@ -688,6 +716,14 @@ async def stream_landing_demo_message_v2(
                     except Exception as e:
                         logger.error(f"Failed to log demo analytics: {e}")
             
+            except DatabaseConnectionError as e:
+                # Database connection error - use user-friendly message
+                logger.error(f"Database connection error during demo streaming: {e.technical_message}", exc_info=False)
+                error_event = {
+                    'type': 'error',
+                    'message': e.user_message
+                }
+                yield f"data: {json.dumps(error_event)}\n\n"
             except Exception as e:
                 logger.error(f"Error during demo streaming: {e}", exc_info=True)
                 error_event = {

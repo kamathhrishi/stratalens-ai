@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 rag_logger = logging.getLogger('rag_system')
 
 
+class DatabaseConnectionError(Exception):
+    """Custom exception for database connection errors with user-friendly messages."""
+    
+    def __init__(self, user_message: str, technical_message: str = None):
+        self.user_message = user_message
+        self.technical_message = technical_message or user_message
+        super().__init__(user_message)
+    
+    def __str__(self):
+        return self.user_message
+
+
 # ═════════════════════════════════════════════════════════════════════
 # STAGE 1: INITIALIZATION & CONNECTION MANAGEMENT
 # ═════════════════════════════════════════════════════════════════════
@@ -192,13 +204,17 @@ class DatabaseManager:
                 except:
                     pass
                 
-                # If this was the last attempt, log error and return empty
+                # If this was the last attempt, raise exception instead of returning empty
                 if attempt >= max_retries:
+                    error_msg = f"Database connection error after {max_retries + 1} attempts"
                     logger.error(f"❌ Database error finding last {n} quarters for {ticker} after {max_retries + 1} attempts: {e}")
                     logger.error(f"❌ Exception type: {type(e).__name__}")
                     import traceback
                     logger.error(f"❌ Stack trace: {traceback.format_exc()}")
-                    return []
+                    raise DatabaseConnectionError(
+                        user_message="Unable to connect to the database. Please try again in a moment.",
+                        technical_message=f"Database connection failed after {max_retries + 1} attempts: {str(e)}"
+                    )
                 
                 # Wait a bit before retrying
                 import time
