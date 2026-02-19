@@ -17,8 +17,8 @@ import openai
 
 # Import local modules
 from .config import Config
-from app.schemas.rag import QuestionAnalysisResult
 from .conversation_memory import ConversationMemory
+from agent.llm import get_llm, LLMClient
 from .rag_utils import parse_json_with_repair
 from agent.prompts import (
     TICKER_REPHRASING_SYSTEM_PROMPT,
@@ -45,36 +45,51 @@ rag_logger = logging.getLogger('rag_system')
 class QuestionAnalyzer:
     """Analyzes and preprocesses questions for the RAG system."""
     
-    def __init__(self, openai_api_key: Optional[str] = None, config: Config = None, database_manager = None):
-        """Initialize the question analyzer."""
-        # Use Cerebras API key
-        cerebras_api_key = os.getenv("CEREBRAS_API_KEY")
-        if not cerebras_api_key:
-            raise ValueError("CEREBRAS_API_KEY is required for question analysis")
-        
-        self.cerebras_api_key = cerebras_api_key
-        self.config = config or Config()  # Use provided config or create new one
-        self.database_manager = database_manager  # Store database_manager for company-specific quarter queries
-        
-        # Initialize Cerebras client
-        try:
-            from cerebras.cloud.sdk import Cerebras
-            self.client = Cerebras(api_key=cerebras_api_key)
-            self.cerebras_available = True
-            logger.info(f"✅ QuestionAnalyzer initialized successfully with Cerebras (model: {self.config.get('cerebras_model')})")
-        except ImportError:
-            logger.error("❌ Cerebras SDK not installed. Run: pip install cerebras-cloud-sdk")
-            raise
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Cerebras client: {e}")
-            raise
-        
-        # Initialize conversation memory
+    def __init__(self, openai_api_key: Optional[str] = None, config: Config = None, database_manager = None, llm: Optional[LLMClient] = None):
+        """Initialize the question analyzer. Uses shared LLM from config if llm not provided."""
+        self.config = config or Config()
+        self.database_manager = database_manager
+        self.llm = llm if llm is not None else get_llm(self.config, openai_api_key=openai_api_key)
         self.conversation_memory = ConversationMemory()
+        logger.info(f"✅ QuestionAnalyzer initialized with LLM ({self.llm.provider_name})")
 
     # ═════════════════════════════════════════════════════════════════════
     # STAGE 2: QUESTION ANALYSIS (LLM-based Analysis)
     # ═════════════════════════════════════════════════════════════════════
+
+    def _build_fallback_from_raw_json(self, raw_json: Dict[str, Any], question: str) -> Dict[str, Any]:
+        """Build a fallback analysis response from partially-parsed raw JSON."""
+        return {
+            "is_valid": raw_json.get('is_valid', True),
+            "reason": raw_json.get('reason', 'Question analysis completed'),
+            "question_type": raw_json.get('question_type', 'multiple_companies'),
+            "extracted_ticker": raw_json.get('extracted_ticker'),
+            "extracted_tickers": raw_json.get('extracted_tickers', []),
+            "topic": raw_json.get('topic', ''),
+            "time_refs": raw_json.get('time_refs', []),
+            "suggested_improvements": raw_json.get('suggested_improvements', []),
+            "confidence": raw_json.get('confidence', 0.5),
+            "user_hints": raw_json.get('user_hints', {}),
+            "original_question": question
+        }
+
+    @staticmethod
+    def _build_error_fallback(question: str) -> Dict[str, Any]:
+        """Build a generic error fallback when no JSON could be parsed at all."""
+        return {
+            "is_valid": False,
+            "reason": "Unable to analyze your question. Please try rephrasing it.",
+            "question_type": "invalid",
+            "extracted_ticker": None,
+            "extracted_tickers": [],
+            "topic": "",
+            "time_refs": [],
+            "suggested_improvements": ["Try asking about a specific company like $AAPL or $MSFT"],
+            "confidence": 0.0,
+            "user_hints": {},
+            "original_question": question
+        }
+
 
     async def analyze_question(self, question: str, conversation_id: str = None, db_connection = None) -> Dict[str, Any]:
         """Analyze a question and determine the appropriate data source (earnings transcripts, 10-K filings, or news)."""
@@ -97,7 +112,32 @@ class QuestionAnalyzer:
                         has_conversation_context = True
                         rag_logger.info(f"📚 Conversation context retrieved ({len(conversation_context)} chars)")
                         rag_logger.info(f"📚 Context preview: {conversation_context[:200]}...")
-                        conversation_context = f"\n{conversation_context}\n"
+                        conversation_context = f"""
+
+═══════════════════════════════════════════════════════════════════════════════
+CONVERSATION HISTORY (READ THIS - THEN DECIDE WHETHER TO USE IT OR IGNORE IT)
+═══════════════════════════════════════════════════════════════════════════════
+Below is recent dialogue. The CURRENT question might refer to it (e.g. "those companies",
+"their", "compare them") - OR the user might be asking about something completely
+different or a different company. You must decide:
+
+  • USE this history when: The question clearly refers back to the conversation
+    (pronouns, "those companies", "all of them", "the companies above", "same companies",
+    "compare them", "their revenue", etc.). Then extract tickers FROM THIS HISTORY.
+
+  • IGNORE this history when: The user explicitly asks about a different company
+    (e.g. "What about $WMT?", "Now look at Costco", "Same for $DIS?") or asks a new
+    standalone question that does not reference the prior discussion. Then use only
+    tickers mentioned in the current question (e.g. $TICKER or explicit name).
+═══════════════════════════════════════════════════════════════════════════════
+
+{conversation_context}
+
+═══════════════════════════════════════════════════════════════════════════════
+END CONVERSATION HISTORY - Use it only when the question references prior context;
+ignore it when the user is asking about a different company or a fresh, standalone question.
+═══════════════════════════════════════════════════════════════════════════════
+"""
                     else:
                         rag_logger.info(f"📚 No conversation context found for conversation_id: {conversation_id}")
                 
@@ -105,20 +145,36 @@ class QuestionAnalyzer:
                 quarter_context = self.config.get_quarter_context_for_llm()
                 
                 # Build context-aware instructions for ticker extraction
-                # Note: Semantic grounding rule is defined once in the CRITICAL RULE section below
                 if has_conversation_context:
-                    ticker_instructions = """1. Extract company tickers from $TICKER format (e.g., $AAPL -> AAPL)
-   - **CRITICAL**: The question uses references to previous conversation. YOU MUST extract ALL relevant company tickers from the conversation context above
-   - Look through the ENTIRE conversation context to find ALL ticker symbols that were mentioned in previous User or Assistant messages
-   - If the question says "all companies mentioned above", "those companies", "these companies" OR uses pronouns like "their", "they", "it", extract ALL tickers found in the conversation, not just one
-   - For contextual references, the conversation history is your primary source of company information
-   - Apply SEMANTIC GROUNDING rule (see below) to rephrased_question"""
+                    ticker_instructions = """**STEP 0 - WHEN CONVERSATION HISTORY IS PRESENT:**
+   - READ the CONVERSATION HISTORY above. Then decide whether the CURRENT question is about that prior context or about something new.
+
+**WHEN TO USE THE CONVERSATION HISTORY (resolve tickers from history):**
+   - The question uses pronouns or back-references that clearly point to the prior discussion: "those companies", "these companies", "all companies (mentioned) above", "their", "they", "them", "it" (referring to companies), "compare them", "same companies", "the companies we discussed", "all of them", "each of them", "both companies".
+   - In that case: extract EVERY ticker that appears in the conversation history (User or Assistant messages). Do NOT output extracted_tickers: [] when the question clearly refers to prior companies.
+
+**WHEN TO IGNORE THE CONVERSATION HISTORY (do not use it for tickers):**
+   - The user explicitly asks about a different company: e.g. "What about $WMT?", "Now do Costco", "Same for $DIS?", "Switch to $PG". Use only the ticker(s) the user is asking about now.
+   - The question is a new, standalone question with no reference to the prior dialogue (e.g. a new $TICKER in the question, or a general question that does not say "they", "those", "their", "above", etc.). Then extract only from the current question; conversation context does not matter for ticker extraction.
+   - When in doubt: if the question names a specific company (e.g. $TICKER or company name) that is different from or in addition to the conversation, prefer the current question's company/tickers. If the question is vague and refers to "them" or "those companies", use the history.
+
+**FOLLOW-UP "THE SAME ABOUT X" / "WHAT ABOUT X" (critical for memory):**
+   - When the user asks "would you say the same about $X?", "what about [company]?", "same for $Y?" they are asking to apply the **same topic or conclusion** from the previous turn to the **new** company. You must use conversation context for the TOPIC, not for tickers.
+   - Tickers: set extracted_tickers to the **new** company only (e.g. ["WMT"], ["DIS"], ["PG"]) - the one they are asking about now.
+   - Topic: set it to the **SAME CONCEPT/TOPIC** as the previous question or the previous Assistant answer. Read the CONVERSATION HISTORY: if the prior was about "biggest risk" or "risk factors", use "risk factors"; if the prior was about "revenue growth" or "margins", use "revenue growth and margins" or "gross margin and profitability".
+
+**FOLLOW-UP TEMPORAL INHERITANCE (critical for continuity):**
+   - When the current question does NOT explicitly mention a year or quarter, but IS clearly a follow-up to the prior turn (e.g. "now show me the income statement", "what about expenses?", "also the cash flow statement"), detect and include the time references from the conversation history.
+   - Example: Prior question was "Show me AAPL's balance sheet in 2024" -> follow-up "now income statement" -> time_refs should include ["2024"].
+   - Example: Prior question was "What did MSFT say about AI in Q3 2024?" -> follow-up "what about revenue?" -> time_refs should include ["Q3 2024"].
+   - Only override if the current question explicitly specifies a DIFFERENT time period (e.g. "now show me 2023").
+
+1. Extract company tickers: from $TICKER format in the current question (e.g. $AAPL -> AAPL), and from the conversation history ONLY when the question clearly references prior context (see above)."""
                 else:
-                    ticker_instructions = """1. Extract company tickers from $TICKER format (e.g., $AAPL -> AAPL)
-   - Apply SEMANTIC GROUNDING rule (see below) to rephrased_question"""
+                    ticker_instructions = """1. Extract company tickers from $TICKER format (e.g., $AAPL -> AAPL)"""
                 
                 # Create analysis prompt following JSON output best practices
-                analysis_prompt = f"""Analyze this financial/business question and determine the appropriate data source. Respond with valid JSON only.
+                analysis_prompt = f"""Analyze this financial/business question and extract key information. Respond with valid JSON only.
 
 QUESTION: "{question}"
 
@@ -128,52 +184,11 @@ QUESTION: "{question}"
 
 INSTRUCTIONS:
 {ticker_instructions}
-2. **SEMANTIC DATA SOURCE ROUTING** - Analyze the INTENT of the question to determine the best data source:
-
-   **Think about WHAT TYPE OF INFORMATION would best answer this question:**
-
-   A) **10-K SEC Filings** (data_source="10k", needs_10k=true) - Best for:
-      - Annual/full-year financial data, comprehensive financial statements
-      - Balance sheets, income statements, cash flow statements, stockholders equity
-      - Executive compensation, CEO pay, salary, stock awards, bonuses
-      - Risk factors, legal proceedings, regulatory matters
-      - Detailed business descriptions, segment breakdowns
-      - Audited financial figures, official SEC disclosures
-      - Historical trends spanning multiple years
-      - Total assets, liabilities, debt levels, capital structure
-
-   B) **Earnings Transcripts** (data_source="earnings_transcripts") - Best for:
-      - Quarterly performance discussions, recent quarter results
-      - Management commentary, executive statements, tone/sentiment
-      - Forward guidance, outlook, projections for upcoming quarters
-      - Analyst Q&A, investor concerns, management responses
-      - Product launches, strategic initiatives discussed in calls
-      - Quarter-over-quarter comparisons, sequential trends
-
-   C) **Latest News** (data_source="latest_news", needs_latest_news=true) - Best for:
-      - Very recent events (last few days/weeks)
-      - Breaking developments, announcements, market reactions
-      - Current market sentiment, stock movements
-      - Recent partnerships, acquisitions, leadership changes
-      - Events that may not yet be in financial filings
-
-   D) **Hybrid** (data_source="hybrid") - Best for:
-      - Questions explicitly requesting multiple perspectives
-      - Comparing official filings with recent developments
-      - Comprehensive analysis needing both historical and current data
-
-   **ROUTING DECISION PROCESS:**
-   1. What is the user trying to learn? (Intent)
-   2. What time period is relevant? (Annual=10K, Quarterly=Transcripts, Recent=News)
-   3. What level of detail/formality? (Official/Audited=10K, Commentary=Transcripts, Current=News)
-   4. Would combining sources provide a better answer? (Consider hybrid)
-5. Detect quarter references:
-   - YEAR ONLY (e.g., "2024", "2025"): quarter_context: "multiple", quarter_count: 4, quarter_reference: "YYYY_all" (ALL quarters of that year)
-   - "last X quarters" or "past X quarters" → quarter_context: "multiple", quarter_count: X
-   - "last few quarters" or "recent quarters" → quarter_context: "multiple", quarter_count: 3
-   - "latest quarter", "most recent quarter", "current quarter" → quarter_context: "latest", quarter_reference: "latest"
-   - Specific quarter (e.g., "Q1 2024", "2024 Q1") → quarter_context: "specific", quarter_reference: "2024_q1"
-   - Otherwise → quarter_context: "latest", quarter_count: null
+2. Classify question type based on the nature of the question
+3. Extract the main topic/subject of the question (what the user is asking about)
+4. Detect temporal references (e.g., "Q4 2024", "2024", "latest quarter") but do NOT resolve them
+5. Identify any explicit user requests or hints (e.g., "check 10-K", "from earnings call", "latest news")
+6. Assess validity and provide suggestions if needed
 
 REQUIRED JSON STRUCTURE:
 {{
@@ -182,24 +197,12 @@ REQUIRED JSON STRUCTURE:
   "question_type": "specific_company|multiple_companies|general_market|financial_metrics|guidance|challenges|outlook|industry_analysis|executive_leadership|business_strategy|company_info|latest_news|invalid",
   "extracted_ticker": "TICKER or null",
   "extracted_tickers": ["TICKER1", "TICKER2"],
-  "rephrased_question": "Semantically grounded version (NO company names, NO time periods, ONLY concepts)",
+  "topic": "what the question is about (e.g., 'iPhone sales', 'risk factors', 'revenue growth')",
+  "time_refs": ["Q4 2024", "latest"],
   "suggested_improvements": ["Suggestion 1"],
   "confidence": 0.95,
-  "quarter_reference": "2024_q3 or null",
-  "quarter_context": "latest|previous|specific|multiple",
-  "quarter_count": 3 or null,
-  "data_source": "10k|latest_news|earnings_transcripts|hybrid",
-  "needs_latest_news": false,
-  "needs_10k": false
+  "user_hints": {{}}
 }}
-
-**CRITICAL RULE FOR rephrased_question - SEMANTIC GROUNDING**:
-- REMOVE company names: Transcripts already filtered by ticker
-- REMOVE time periods: Transcripts already filtered by quarter/year
-- FOCUS on concepts, metrics, and topics
-- Example: "What was Apple's Q4 2024 revenue?" → "revenue and sales performance"
-- Example: "Compare Microsoft and Google cloud revenue" → "cloud services revenue and growth"
-- Example: "Did Amazon discuss AWS in Q3?" → "cloud computing services discussion and performance"
 
 **CRITICAL: DETECTING INVALID QUESTIONS**
 
@@ -218,115 +221,156 @@ This includes: gibberish, greetings, non-finance topics, things we don't have da
 
 When marking as invalid, provide a helpful reason explaining what we CAN help with and suggest example questions.
 
+**USER HINTS** - Intelligently determine answer complexity and data sources:
+
+**Data Source Hints:**
+- If user mentions "10-K", "annual report", "SEC filing" -> user_hints: {{"data_source": "10k"}}
+- If user mentions "earnings call", "transcript", "earnings" -> user_hints: {{"data_source": "earnings_transcripts"}}
+- If user mentions "latest news", "recent news", "news" -> user_hints: {{"data_source": "latest_news"}}
+
+**Answer Mode (ALWAYS SET THIS - REQUIRED):**
+You MUST determine the appropriate answer_mode for EVERY question based on its complexity and scope:
+
+- **"direct"** - Simple, single-datapoint lookups that need just a number or brief fact:
+  * "What was AAPL revenue in Q4 2024?"
+  * "What is Microsoft's EPS?"
+  * "What was the profit margin?"
+  * Simple yes/no questions
+  * Single metric queries with no analysis required
+
+- **"standard"** - Moderate questions requiring some context and explanation:
+  * "Tell me about Apple's recent performance"
+  * "What did Microsoft announce?"
+  * Questions asking about 1-2 related metrics
+  * Straightforward comparisons between 2 companies
+  * "What did the CEO say about X?"
+
+- **"detailed"** - Complex, analytical questions requiring comprehensive research and multiple data points:
+  * Questions asking to "analyze", "comment on", "explain", "evaluate", "assess"
+  * Questions about financial statement analysis (balance sheet, cash flow, debt structure, capital allocation)
+  * Multi-company comparisons (3+ companies)
+  * Questions asking for "breakdown", "details", "comprehensive", "usage", "strategy", "rationale"
+  * Questions requiring synthesis of multiple data sources
+  * "How" and "Why" questions requiring deep analysis
+  * Questions about trends over multiple periods
+  * Industry analysis questions
+  * Executive leadership/strategy questions
+
+**deep_search:** ONLY when user EXPLICITLY requests exhaustive/thorough/deep search
+  * User explicitly says: "search thoroughly", "dig deep", "exhaustive search", "find everything"
+  * User explicitly asks to "search harder" or "look more carefully"
+  * User asks for "all mentions" or "complete list" of something specific
+  * **IMPORTANT:** Do NOT use deep_search by default - only when explicitly requested
+  * **Default to "detailed" for complex questions unless user explicitly asks for deeper search**
+
+**Examples of answer_mode:**
+- "What was AAPL revenue?" -> {{"answer_mode": "direct"}}
+- "Tell me about AAPL's iPhone sales" -> {{"answer_mode": "standard"}}
+- "Comment on Oracle's balance sheet and debt usage" -> {{"answer_mode": "detailed"}}
+- "Analyze Microsoft's cloud strategy over the past year" -> {{"answer_mode": "detailed"}}
+- "Compare revenue growth for AAPL, MSFT, and GOOGL" -> {{"answer_mode": "detailed"}}
+- "Search thoroughly for all mentions of AI investments" -> {{"answer_mode": "deep_search"}}
+- "Dig deep and find everything about Oracle's subsidiaries" -> {{"answer_mode": "deep_search"}}
+
+**CRITICAL:** Always include "answer_mode" in user_hints - DO NOT leave it out. If you're unsure, default to "standard".
+
 EXAMPLES:
 
 QUESTION: "Apple's revenue in 2024"
-OUTPUT: {{"is_valid": true, "reason": "Valid earnings question", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "revenue and sales performance", "suggested_improvements": ["Specify exact quarters"], "confidence": 0.9, "quarter_reference": "2024_all", "quarter_context": "multiple", "quarter_count": 4, "data_source": "earnings_transcripts"}}
+OUTPUT: {{"is_valid": true, "reason": "Valid financial question about Apple", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "revenue", "time_refs": ["2024"], "suggested_improvements": ["Specify exact quarters for more precise data"], "confidence": 0.9, "user_hints": {{"answer_mode": "direct"}}}}
 
 QUESTION: "Compare Microsoft and Google cloud revenue for the last 3 years"
-OUTPUT: {{"is_valid": true, "reason": "Valid earnings question", "question_type": "multiple_companies", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT", "GOOGL"], "rephrased_question": "cloud services revenue performance and growth trajectory", "suggested_improvements": ["Specify exact quarters"], "confidence": 0.9, "quarter_reference": null, "quarter_context": "multiple", "quarter_count": 12, "data_source": "earnings_transcripts"}}
+OUTPUT: {{"is_valid": true, "reason": "Valid comparison question", "question_type": "multiple_companies", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT", "GOOGL"], "topic": "cloud revenue", "time_refs": ["last 3 years"], "suggested_improvements": [], "confidence": 0.9, "user_hints": {{"answer_mode": "detailed"}}}}
 
 QUESTION: "What did Apple say about iPhone sales in their latest quarter?"
-OUTPUT: {{"is_valid": true, "reason": "Valid earnings question", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "iPhone product sales discussion and performance", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null, "data_source": "earnings_transcripts"}}
+OUTPUT: {{"is_valid": true, "reason": "Valid question about quarterly results", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "iPhone sales", "time_refs": ["latest quarter"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"answer_mode": "standard"}}}}
 
 QUESTION: "How has Microsoft's revenue changed over the last 3 quarters?"
-OUTPUT: {{"is_valid": true, "reason": "Valid earnings question", "question_type": "specific_company", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT"], "rephrased_question": "revenue changes and growth trends", "suggested_improvements": [], "confidence": 0.9, "quarter_reference": null, "quarter_context": "multiple", "quarter_count": 3, "data_source": "earnings_transcripts", "needs_latest_news": false}}
+OUTPUT: {{"is_valid": true, "reason": "Valid question about revenue trends", "question_type": "specific_company", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT"], "topic": "revenue changes", "time_refs": ["last 3 quarters"], "suggested_improvements": [], "confidence": 0.9, "user_hints": {{"answer_mode": "standard"}}}}
+
+QUESTION: "Comment on Oracle's balance sheet and their usage of debt"
+OUTPUT: {{"is_valid": true, "reason": "Complex financial analysis question", "question_type": "specific_company", "extracted_ticker": "ORCL", "extracted_tickers": ["ORCL"], "topic": "balance sheet and debt analysis", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"answer_mode": "detailed", "data_source": "10k"}}}}
 
 QUESTION: "What's the latest news on NVIDIA?"
-OUTPUT: {{"is_valid": true, "reason": "Question about latest news", "question_type": "latest_news", "extracted_ticker": "NVDA", "extracted_tickers": ["NVDA"], "rephrased_question": "latest news and current developments", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": null, "quarter_context": "latest", "quarter_count": null, "data_source": "latest_news", "needs_latest_news": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question about latest news", "question_type": "latest_news", "extracted_ticker": "NVDA", "extracted_tickers": ["NVDA"], "topic": "latest news", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "latest_news"}}}}
 
 QUESTION: "Find me all latest news on nvidia"
-OUTPUT: {{"is_valid": true, "reason": "Question explicitly asking for latest news", "question_type": "latest_news", "extracted_ticker": "NVDA", "extracted_tickers": ["NVDA"], "rephrased_question": "latest news and current information", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": null, "quarter_context": "latest", "quarter_count": null, "data_source": "latest_news", "needs_latest_news": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question explicitly asking for latest news", "question_type": "latest_news", "extracted_ticker": "NVDA", "extracted_tickers": ["NVDA"], "topic": "latest news", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "latest_news"}}}}
 
 QUESTION: "What was Tim Cook's compensation in 2023? Find out from the 10k"
-OUTPUT: {{"is_valid": true, "reason": "Question about executive compensation from 10-K filing", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "executive compensation and pay details for chief executive officer", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "2023_all", "quarter_context": "multiple", "quarter_count": 4, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question about executive compensation", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "CEO compensation", "time_refs": ["2023"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k"}}}}
 
 QUESTION: "Find out Tim cooks compensation from 10k for 2023"
-OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10k and asks about executive compensation", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "executive compensation and pay details for chief executive officer", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "2023_all", "quarter_context": "multiple", "quarter_count": 4, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10k", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "executive compensation", "time_refs": ["2023"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k"}}}}
 
 QUESTION: "find out Tim cooks compensation in 2023"
-OUTPUT: {{"is_valid": true, "reason": "Question about executive compensation - this data is only in 10-K filings, not earnings transcripts", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "executive compensation and pay details for chief executive officer", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "2023_all", "quarter_context": "multiple", "quarter_count": 4, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question about executive compensation", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "executive compensation", "time_refs": ["2023"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{}}}}
 
 QUESTION: "What was the CEO's salary at Apple in 2023?"
-OUTPUT: {{"is_valid": true, "reason": "Question about CEO salary - executive compensation is only in 10-K filings", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "chief executive officer salary and compensation", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "2023_all", "quarter_context": "multiple", "quarter_count": 4, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question about CEO salary", "question_type": "executive_leadership", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "CEO salary", "time_refs": ["2023"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{}}}}
 
 QUESTION: "Show me Apple's balance sheet from their annual report"
-OUTPUT: {{"is_valid": true, "reason": "Question about balance sheet from 10-K", "question_type": "financial_metrics", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "balance sheet and financial position", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question about balance sheet", "question_type": "financial_metrics", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "balance sheet", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k"}}}}
 
 QUESTION: "What are Apple's total assets from their 10-K filing?"
-OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10-K and asks about financial statements", "question_type": "financial_metrics", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "total assets and balance sheet information", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10-K", "question_type": "financial_metrics", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "total assets", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k"}}}}
 
 QUESTION: "Get me Microsoft's risk factors from the 10k"
-OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10k and asks about risk factors", "question_type": "company_info", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT"], "rephrased_question": "risk factors and business risks", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10k", "question_type": "company_info", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT"], "topic": "risk factors", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k"}}}}
 
 QUESTION: "Show me Google's income statement from their 10-K"
-OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10-K and asks about financial statements", "question_type": "financial_metrics", "extracted_ticker": "GOOGL", "extracted_tickers": ["GOOGL"], "rephrased_question": "income statement and financial performance", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null, "data_source": "10k", "needs_10k": true}}
+OUTPUT: {{"is_valid": true, "reason": "Question explicitly mentions 10-K", "question_type": "financial_metrics", "extracted_ticker": "GOOGL", "extracted_tickers": ["GOOGL"], "topic": "income statement", "time_refs": ["latest"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k"}}}}
+
+QUESTION: "Analyze $ABNB 10k from 2020"
+OUTPUT: {{"is_valid": true, "reason": "Question asks for 10-K analysis for a specific year", "question_type": "specific_company", "extracted_ticker": "ABNB", "extracted_tickers": ["ABNB"], "topic": "10-K analysis", "time_refs": ["2020"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k", "answer_mode": "detailed"}}}}
+
+QUESTION: "Compile $ABNB performance from 2020 to 2024 based on its 10k"
+OUTPUT: {{"is_valid": true, "reason": "Question asks for multi-year 10-K compilation", "question_type": "specific_company", "extracted_ticker": "ABNB", "extracted_tickers": ["ABNB"], "topic": "performance compilation", "time_refs": ["2020 to 2024"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"data_source": "10k", "answer_mode": "detailed"}}}}
 
 QUESTION: "What did Apple say about their revenue in Q4 2024?"
-OUTPUT: {{"is_valid": true, "reason": "Question about quarterly earnings discussion", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "revenue performance and sales results", "suggested_improvements": [], "confidence": 0.95, "quarter_reference": "2024_q4", "quarter_context": "specific", "quarter_count": null, "data_source": "earnings_transcripts", "needs_10k": false}}
+OUTPUT: {{"is_valid": true, "reason": "Question about quarterly earnings discussion", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "revenue discussion", "time_refs": ["Q4 2024"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{}}}}
 
-QUESTION: "Compare Apple's revenue in Q4 2024 earnings call vs their annual report"
-OUTPUT: {{"is_valid": true, "reason": "Hybrid question comparing earnings call with annual report (10-K)", "question_type": "financial_metrics", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "revenue comparison and financial performance", "suggested_improvements": [], "confidence": 0.9, "quarter_reference": "2024_q4", "quarter_context": "specific", "quarter_count": null, "data_source": "hybrid", "needs_10k": true}}
-
-QUESTION: "Analyze Google's AI strategy using earnings calls and latest news"
-OUTPUT: {{"is_valid": true, "reason": "Hybrid question asking for both earnings data and latest news", "question_type": "business_strategy", "extracted_ticker": "GOOGL", "extracted_tickers": ["GOOGL"], "rephrased_question": "artificial intelligence strategy and initiatives", "suggested_improvements": [], "confidence": 0.9, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null, "data_source": "hybrid", "needs_latest_news": true}}
-
-QUESTION: "Compare Microsoft's Q4 2024 revenue with recent news about their products"
-OUTPUT: {{"is_valid": true, "reason": "Hybrid question combining specific quarter analysis with recent news", "question_type": "specific_company", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT"], "rephrased_question": "revenue performance and product developments", "suggested_improvements": [], "confidence": 0.9, "quarter_reference": "2024_q4", "quarter_context": "specific", "quarter_count": null, "data_source": "hybrid", "needs_latest_news": true}}
+QUESTION: "Give me a brief summary of Apple's Q4 revenue"
+OUTPUT: {{"is_valid": true, "reason": "Valid question with answer mode hint", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "revenue", "time_refs": ["Q4"], "suggested_improvements": [], "confidence": 0.95, "user_hints": {{"answer_mode": "direct"}}}}
 
 QUESTION: "wrekashfkjbhkl;ahsnhbnsjg"
-OUTPUT: {{"is_valid": false, "reason": "I couldn't understand your question. I can help you analyze public company earnings calls, 10-K filings, and news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "rephrased_question": "", "suggested_improvements": ["What did $AAPL say about revenue in Q4?", "Compare $MSFT and $GOOGL cloud revenue", "What's the latest news on $NVDA?"], "confidence": 0.0, "quarter_reference": null, "quarter_context": null, "quarter_count": null, "data_source": null, "needs_latest_news": false, "needs_10k": false}}
+OUTPUT: {{"is_valid": false, "reason": "I couldn't understand your question. I can help you analyze public company earnings calls, 10-K filings, and news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "topic": "", "time_refs": [], "suggested_improvements": ["What did $AAPL say about revenue in Q4?", "Compare $MSFT and $GOOGL cloud revenue", "What's the latest news on $NVDA?"], "confidence": 0.0, "user_hints": {{}}}}
 
 QUESTION: "hello hi"
-OUTPUT: {{"is_valid": false, "reason": "Hi! I'm a financial research assistant. I can help you analyze public company earnings calls, 10-K SEC filings, and company news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "rephrased_question": "", "suggested_improvements": ["What guidance did $TSLA provide for next quarter?", "Show me $AAPL's executive compensation from 10-K", "What are tech companies saying about AI?"], "confidence": 0.0, "quarter_reference": null, "quarter_context": null, "quarter_count": null, "data_source": null, "needs_latest_news": false, "needs_10k": false}}
+OUTPUT: {{"is_valid": false, "reason": "Hi! I'm a financial research assistant. I can help you analyze public company earnings calls, 10-K SEC filings, and company news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "topic": "", "time_refs": [], "suggested_improvements": ["What guidance did $TSLA provide for next quarter?", "Show me $AAPL's executive compensation from 10-K", "What are tech companies saying about AI?"], "confidence": 0.0, "user_hints": {{}}}}
 
 QUESTION: "What's a good recipe for pasta?"
-OUTPUT: {{"is_valid": false, "reason": "I can only help with public company financial data. I have access to earnings call transcripts, 10-K filings, and company news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "rephrased_question": "", "suggested_improvements": ["What did $AAPL report in their latest earnings?", "Compare profit margins across tech companies", "What risks did $META disclose in their 10-K?"], "confidence": 0.0, "quarter_reference": null, "quarter_context": null, "quarter_count": null, "data_source": null, "needs_latest_news": false, "needs_10k": false}}
+OUTPUT: {{"is_valid": false, "reason": "I can only help with public company financial data. I have access to earnings call transcripts, 10-K filings, and company news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "topic": "", "time_refs": [], "suggested_improvements": ["What did $AAPL report in their latest earnings?", "Compare profit margins across tech companies", "What risks did $META disclose in their 10-K?"], "confidence": 0.0, "user_hints": {{}}}}
 
 QUESTION: "How do I get a home loan?"
-OUTPUT: {{"is_valid": false, "reason": "I don't have data on personal finance or loans. I specialize in public company financial analysis using earnings calls, 10-K filings, and news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "rephrased_question": "", "suggested_improvements": ["What did banks like $JPM say about lending in earnings?", "Compare $BAC and $WFC financial performance", "What's in $GS latest 10-K filing?"], "confidence": 0.0, "quarter_reference": null, "quarter_context": null, "quarter_count": null, "data_source": null, "needs_latest_news": false, "needs_10k": false}}
+OUTPUT: {{"is_valid": false, "reason": "I don't have data on personal finance or loans. I specialize in public company financial analysis using earnings calls, 10-K filings, and news.", "question_type": "invalid", "extracted_ticker": null, "extracted_tickers": [], "topic": "", "time_refs": [], "suggested_improvements": ["What did banks like $JPM say about lending in earnings?", "Compare $BAC and $WFC financial performance", "What's in $GS latest 10-K filing?"], "confidence": 0.0, "user_hints": {{}}}}"""
 
-**DATA SOURCE SELECTION GUIDE:**
-
-Use semantic understanding to pick the BEST source for the question's intent:
-
-**10-K Filings** - Choose when question is about:
-- Comprehensive annual data, full-year figures, audited financials
-- Balance sheets, assets, liabilities, equity, debt structure
-- Executive/CEO compensation, salaries, stock awards (ONLY in 10-K)
-- Risk factors, legal matters, regulatory disclosures
-- Detailed segment breakdowns, business descriptions
-- Multi-year historical comparisons
-
-**Earnings Transcripts** - Choose when question is about:
-- Quarterly results, recent quarter performance
-- Management commentary, what executives said/discussed
-- Forward guidance, next quarter/year outlook
-- Analyst questions and management responses
-- Strategic initiatives mentioned in earnings calls
-- Quarter-over-quarter trends, sequential changes
-
-**Latest News** - Choose when question is about:
-- Very recent events (days/weeks old)
-- Breaking news, current developments
-- Market reactions, stock movements
-- Recent announcements not yet in filings
-
-**Hybrid** - Choose when:
-- Question needs comprehensive view from multiple sources
-- Comparing different time periods or data types
-- User explicitly wants multiple perspectives
-
-**KEY PRINCIPLE**: Route based on what information type would BEST answer the question, not based on specific keywords. Consider the user's underlying intent."""
-                
-                # Add conversation context example only when context is present
+                # Add conversation context examples and rules when context is present
                 if has_conversation_context:
                     analysis_prompt += """
 
-CONVERSATION CONTEXT EXAMPLE (since you have conversation context above):
-QUESTION: "Compare latest quarter of all companies mentioned above"
-CONVERSATION CONTEXT: User previously asked about $MSFT, $GOOGL, and $INTC
-OUTPUT: {{"is_valid": true, "reason": "Valid earnings question referencing previous conversation", "question_type": "multiple_companies", "extracted_ticker": "MSFT", "extracted_tickers": ["MSFT", "GOOGL", "INTC"], "rephrased_question": "key financial results and business performance highlights", "suggested_improvements": [], "confidence": 0.9, "quarter_reference": "latest", "quarter_context": "latest", "quarter_count": null}}"""
+**CONVERSATION CONTEXT - WHEN TO USE IT vs WHEN TO IGNORE IT**
+
+USE conversation history for tickers when the question clearly refers to the prior discussion (no new company named):
+- Trigger phrases: "those companies", "these companies", "all companies above", "their", "they", "them", "compare them", "same companies", "the companies we discussed", "all of them", "each of them", "both companies".
+- Then: set extracted_tickers to ALL tickers from the conversation history. Do NOT output extracted_tickers: [] when the question clearly refers to prior companies.
+
+IGNORE conversation history when the user is asking about a different company or a fresh question:
+- User explicitly names a different company: e.g. "What about $WMT?", "Now do Costco", "Same for $DIS?", "Switch to $PG" -> use only the company they are asking about now (e.g. ["WMT"], ["COST"], ["DIS"], ["PG"]). Do not carry over tickers from the previous conversation.
+- Standalone question with a new $TICKER or company name in the current message -> extract only from the current question. Conversation context does not matter.
+- When the question could be either "about the same companies" or "about a new company": if a specific new company is named ($TICKER or name), treat it as a new request and use that ticker; if only pronouns/back-references appear, use the history.
+
+EXAMPLES (USE history):
+- QUESTION: "Compare latest quarter of all companies mentioned above" + CONVERSATION had $TGT, $WMT, $COST -> extracted_tickers: ["TGT", "WMT", "COST"]
+- QUESTION: "What was their revenue?" + CONVERSATION had $NFLX -> extracted_tickers: ["NFLX"]
+
+EXAMPLES (IGNORE history - different or new company):
+- QUESTION: "What about Kroger's margins?" or "$KR margins?" + CONVERSATION had $TGT, $WMT -> extracted_tickers: ["KR"] (user switched to a different company)
+- QUESTION: "How did Disney do in Q3?" + CONVERSATION had $NFLX -> extracted_tickers: ["DIS"] (user is now asking about Disney, not Netflix)
+
+FOLLOW-UP "THE SAME ABOUT X" - use conversation for TOPIC, new company for TICKERS:
+- QUESTION: "Would you say the same about $DIS?" + CONVERSATION: User asked "What is the biggest risk to $NFLX?", Assistant answered about competition/content costs -> extracted_tickers: ["DIS"], topic: "biggest risk, risk factors"
+- QUESTION: "What about Costco's operating margins?" + CONVERSATION: User asked "What were Target's operating margins?" -> extracted_tickers: ["COST"], topic: "operating margins"""
                 
                 analysis_prompt += """
 
@@ -338,28 +382,40 @@ RESPOND WITH VALID JSON ONLY. NO EXPLANATIONS OR ADDITIONAL TEXT."""
 
 RETRY ATTEMPT {attempt + 1}: Previous response was invalid JSON.
 CRITICAL: Return ONLY valid JSON matching the exact structure above.
-Double-check: no trailing commas, proper quotes, all 11 fields present.
-Example: {{"is_valid": true, "reason": "Valid question", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "rephrased_question": "concept-focused question without company or time", "suggested_improvements": ["Improvement"], "confidence": 0.9, "quarter_reference": null, "quarter_context": "latest", "quarter_count": null}}"""
+Double-check: no trailing commas, proper quotes, all 7 required fields present.
+Example: {{"is_valid": true, "reason": "Valid question", "question_type": "specific_company", "extracted_ticker": "AAPL", "extracted_tickers": ["AAPL"], "topic": "revenue growth", "time_refs": ["Q4 2024"], "suggested_improvements": [], "confidence": 0.9, "user_hints": {{}}}}"""
 
-                cerebras_model = self.config.get("cerebras_model", "qwen-3-235b-a22b-instruct-2507")
-                rag_logger.info(f"🤖 Sending question to Cerebras model: {cerebras_model} (attempt {attempt + 1}/{max_retries})")
-                
                 # Build context-aware system message
                 if has_conversation_context:
-                    rag_logger.info(f"🧠 Using CONVERSATION CONTEXT MODE - will emphasize ticker extraction from conversation history")
-                    system_message = "You are a JSON-only response assistant for financial data routing. Respond with valid JSON only. Extract tickers from $TICKER format. CRITICAL: Conversation context is provided - extract ALL relevant tickers from the conversation history when the question references previous companies. For multiple companies, rephrased_question must be GENERIC without specific company names. YEAR ONLY questions = quarter_context: 'multiple', quarter_count: 4. SEMANTIC ROUTING: Choose data_source based on what information type BEST answers the question's intent: '10k' for annual data, financial statements, compensation, risk factors, audited figures; 'earnings_transcripts' for quarterly results, management commentary, guidance, analyst Q&A; 'latest_news' for recent events, breaking news, current developments; 'hybrid' when multiple perspectives needed. Executive compensation is ONLY in 10-K filings. No explanations or additional text."
+                    rag_logger.info(f"🧠 Using CONVERSATION CONTEXT MODE - use history for tickers or for topic on 'same about X' follow-ups")
+                    system_message = (
+                        "You are a JSON-only response assistant for financial question analysis. Respond with valid JSON only. Do not use emojis. "
+                        "CONVERSATION HISTORY may be provided. Read it, then decide: "
+                        "(1) USE it for tickers when the question refers to prior companies (e.g. 'those companies', 'their', 'compare them') - set extracted_tickers from history. "
+                        "(2) When the user asks 'the same about $X?' or 'what about [company]?' they want the SAME TOPIC applied to the NEW company: set extracted_tickers to the new company only (e.g. ['DIS'], ['COST']), and set topic to the SAME as the previous question or answer (e.g. if prior was about biggest risk -> 'risk factors'; if prior was margins -> 'operating margins'). "
+                        "(3) IGNORE history for tickers when the user asks a new standalone question with a new $TICKER - use only current question's tickers. "
+                        "Extract topic as the main subject of the question. Detect time_refs (temporal references) but do NOT resolve them. "
+                        "Capture user_hints for explicit requests like 'check 10-K', 'from earnings call', 'latest news', 'brief', 'detailed'. "
+                        "No explanations or extra text."
+                    )
                 else:
                     rag_logger.info(f"🎯 Using STANDARD MODE - no conversation context available")
-                    system_message = "You are a JSON-only response assistant for financial data routing. Respond with valid JSON only. Extract tickers from $TICKER format. For multiple companies, rephrased_question must be GENERIC without specific company names. YEAR ONLY questions = quarter_context: 'multiple', quarter_count: 4. SEMANTIC ROUTING: Choose data_source based on what information type BEST answers the question's intent: '10k' for annual data, financial statements, compensation, risk factors, audited figures; 'earnings_transcripts' for quarterly results, management commentary, guidance, analyst Q&A; 'latest_news' for recent events, breaking news, current developments; 'hybrid' when multiple perspectives needed. Executive compensation is ONLY in 10-K filings. No explanations or additional text."
+                    system_message = (
+                        "You are a JSON-only response assistant for financial question analysis. Respond with valid JSON only. Do not use emojis. "
+                        "Extract tickers from $TICKER format. Extract the main topic/subject of the question. "
+                        "Detect temporal references (time_refs) but do NOT resolve them. "
+                        "Capture user_hints for explicit data source requests ('10-K', 'earnings call', 'latest news') and answer mode hints ('brief', 'detailed'). "
+                        "No explanations or additional text."
+                    )
                 
                 start_time = time.time()
-                cerebras_model = self.config.get("cerebras_model", "qwen-3-235b-a22b-instruct-2507")
+                model = self.config.get("cerebras_model", "qwen-3-235b-instruct-2507")
+                rag_logger.info(f"🤖 Sending question to LLM ({self.llm.provider_name}) model: {model} (attempt {attempt + 1}/{max_retries})")
 
-                # Log to Logfire with span for observability (full prompts)
                 if LOGFIRE_AVAILABLE and logfire:
                     with logfire.span(
-                        "cerebras.question_analysis",
-                        model=cerebras_model,
+                        "llm.question_analysis",
+                        model=model,
                         question=question,
                         system_prompt=system_message,
                         user_prompt=analysis_prompt,
@@ -367,43 +423,31 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                         attempt=attempt + 1,
                         max_retries=max_retries
                     ):
-                        response = self.client.chat.completions.create(
-                            model=cerebras_model,
-                            messages=[
+                        analysis_text = self.llm.complete(
+                            [
                                 {"role": "system", "content": system_message},
                                 {"role": "user", "content": analysis_prompt}
                             ],
-                            max_completion_tokens=1000,
-                            temperature=0.1
-                        )
-                        call_time = time.time() - start_time
-
-                        # Log completion details with full response
-                        logfire.info(
-                            "cerebras.question_analysis.completion",
-                            model=cerebras_model,
-                            duration_seconds=call_time,
-                            response=response.choices[0].message.content if response.choices else None,
-                            prompt_tokens=response.usage.prompt_tokens if response.usage else None,
-                            completion_tokens=response.usage.completion_tokens if response.usage else None,
-                            total_tokens=response.usage.total_tokens if response.usage else None
+                            model=model,
+                            max_tokens=1000,
+                            temperature=0.1,
+                            stream=False,
                         )
                 else:
-                    response = self.client.chat.completions.create(
-                        model=cerebras_model,
-                        messages=[
+                    analysis_text = self.llm.complete(
+                        [
                             {"role": "system", "content": system_message},
                             {"role": "user", "content": analysis_prompt}
                         ],
-                        max_completion_tokens=1000,
-                        temperature=0.1
+                        model=model,
+                        max_tokens=1000,
+                        temperature=0.1,
+                        stream=False,
                     )
-                    call_time = time.time() - start_time
-
-                rag_logger.info(f"✅ Received response from Cerebras (tokens: {response.usage.total_tokens if response.usage else 'unknown'})")
+                call_time = time.time() - start_time
+                rag_logger.info(f"✅ Received response from LLM in {call_time:.3f}s")
                 
-                # Parse JSON response
-                analysis_text = response.choices[0].message.content.strip()
+                analysis_text = analysis_text.strip()
                 rag_logger.info(f"📝 Raw Cerebras response length: {len(analysis_text)} characters")
                 rag_logger.info(f"📝 Raw Cerebras response (first 500 chars): {analysis_text[:500]}")
                 if len(analysis_text) == 0:
@@ -420,67 +464,61 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                 
                 # Try to parse JSON with repair attempts
                 try:
+                    # Local import to avoid circular dependency (app.routers.chat imports agent)
+                    from app.schemas.rag import QuestionAnalysisResult
                     analysis_result = parse_json_with_repair(analysis_text, attempt, QuestionAnalysisResult, rag_logger)
                     rag_logger.info(f"✅ Successfully parsed JSON analysis result")
-                    rag_logger.info(f"📊 Analysis result: valid={analysis_result.get('is_valid')}, ticker={analysis_result.get('extracted_ticker')}, type={analysis_result.get('question_type')}, needs_latest_news={analysis_result.get('needs_latest_news', False)}")
-
-                    # DEBUG: Log data_source from Cerebras
-                    rag_logger.info(f"🔍 DEBUG [CEREBRAS RESPONSE]: data_source={analysis_result.get('data_source')}, needs_10k={analysis_result.get('needs_10k')}")
+                    rag_logger.info(f"📊 Analysis result: valid={analysis_result.get('is_valid')}, ticker={analysis_result.get('extracted_ticker')}, type={analysis_result.get('question_type')}, topic={analysis_result.get('topic', '')}")
 
                     # Add original question
                     analysis_result["original_question"] = question
                 except Exception as parse_error:
-                    # If validation fails but we have the raw JSON, try to extract needs_latest_news
-                    rag_logger.warning(f"⚠️ Validation failed but attempting to extract needs_latest_news from raw response")
+                    # If validation fails but we have the raw JSON, try to extract basic fields
+                    rag_logger.warning(f"⚠️ Validation failed but attempting to extract fields from raw response")
                     import json as json_lib
                     try:
                         raw_json = json_lib.loads(analysis_text)
-                        needs_news = raw_json.get('needs_latest_news', False)
-                        rag_logger.info(f"📰 Extracted needs_latest_news={needs_news} from raw JSON")
+                        topic = raw_json.get('topic', '')
+                        rag_logger.info(f"📊 Extracted topic={topic} from raw JSON")
                         # Re-raise to continue with normal error handling
                         raise parse_error
                     except:
                         raise parse_error
                 
-                # Log quarter detection results for debugging
-                rag_logger.info(f"🔍 Quarter detection results: context={analysis_result.get('quarter_context')}, count={analysis_result.get('quarter_count')}, reference={analysis_result.get('quarter_reference')}")
-                
                 # Log ticker extraction results for debugging (especially important for conversation context)
                 extracted_tickers = analysis_result.get('extracted_tickers', [])
-                rephrased_question = analysis_result.get('rephrased_question', '')
+                topic = analysis_result.get('topic', '')
+                time_refs = analysis_result.get('time_refs', [])
                 question_type = analysis_result.get('question_type', '')
-                
+
                 if extracted_tickers:
                     rag_logger.info(f"🎯 Extracted tickers: {extracted_tickers}")
                     if conversation_context:
                         rag_logger.info(f"🎯 Tickers were extracted with conversation context available")
-                    
-                    # Verify generic rephrasing for multiple companies
-                    if len(extracted_tickers) > 1 and question_type == 'multiple_companies':
-                        # Check if rephrased question contains company names (it shouldn't)
-                        contains_company_names = any(ticker.lower() in rephrased_question.lower() for ticker in extracted_tickers)
-                        if contains_company_names:
-                            rag_logger.warning(f"⚠️ Multiple companies detected but rephrased question contains company names: '{rephrased_question}'")
-                        else:
-                            rag_logger.info(f"✅ Multiple companies with generic rephrased question: '{rephrased_question}'")
                 else:
                     rag_logger.warning(f"⚠️ No tickers extracted from question: '{question}'")
                     if conversation_context:
                         rag_logger.warning(f"⚠️ Conversation context was available but no tickers extracted!")
 
-                # Log question analysis to Logfire with original and rephrased questions
+                # Log temporal detection
+                if time_refs:
+                    rag_logger.info(f"🕒 Detected time references: {time_refs}")
+
+                # Log topic extraction
+                if topic:
+                    rag_logger.info(f"📋 Extracted topic: {topic}")
+
+                # Log question analysis to Logfire
                 if LOGFIRE_AVAILABLE and logfire:
                     logfire.info(
                         "question.analysis.complete",
                         original_question=question,
-                        rephrased_question=analysis_result.get('rephrased_question', ''),
+                        topic=topic,
                         is_valid=analysis_result.get('is_valid', False),
-                        question_type=analysis_result.get('question_type', ''),
-                        data_source=analysis_result.get('data_source', 'earnings_transcripts'),
+                        question_type=question_type,
                         tickers=extracted_tickers,
-                        needs_10k=analysis_result.get('needs_10k', False),
-                        needs_latest_news=analysis_result.get('needs_latest_news', False),
-                        quarter_context=analysis_result.get('quarter_context', 'latest'),
+                        time_refs=time_refs,
+                        user_hints=analysis_result.get('user_hints', {}),
                         confidence=analysis_result.get('confidence', 0)
                     )
 
@@ -503,63 +541,13 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                     try:
                         import json as json_lib
                         raw_json = json_lib.loads(analysis_text)
-
-                        # CRITICAL: Preserve is_valid from LLM response - don't override!
-                        fallback_is_valid = raw_json.get('is_valid', True)
-                        fallback_reason = raw_json.get('reason', 'Question analysis completed')
-                        fallback_question_type = raw_json.get('question_type', 'multiple_companies')
-                        fallback_needs_news = raw_json.get('needs_latest_news', False)
-                        fallback_needs_10k = raw_json.get('needs_10k', False)
-                        fallback_data_source = raw_json.get('data_source')
-                        fallback_rephrased = raw_json.get('rephrased_question', question)
-                        fallback_suggestions = raw_json.get('suggested_improvements', [])
-                        fallback_confidence = raw_json.get('confidence', 0.5)
-                        fallback_tickers = raw_json.get('extracted_tickers', [])
-                        fallback_ticker = raw_json.get('extracted_ticker')
-
-                        rag_logger.info(f"📋 Extracted from raw response: is_valid={fallback_is_valid}, question_type={fallback_question_type}, data_source={fallback_data_source}")
-
-                        fallback_response = {
-                            "is_valid": fallback_is_valid,
-                            "reason": fallback_reason,
-                            "question_type": fallback_question_type,
-                            "extracted_ticker": fallback_ticker,
-                            "extracted_tickers": fallback_tickers,
-                            "rephrased_question": fallback_rephrased,
-                            "suggested_improvements": fallback_suggestions,
-                            "confidence": fallback_confidence,
-                            "quarter_reference": raw_json.get('quarter_reference'),
-                            "quarter_context": raw_json.get('quarter_context'),
-                            "quarter_count": raw_json.get('quarter_count'),
-                            "data_source": fallback_data_source,
-                            "needs_latest_news": fallback_needs_news,
-                            "needs_10k": fallback_needs_10k,
-                            "original_question": question
-                        }
-
-                        rag_logger.info(f"✅ Fallback response created from raw JSON: is_valid={fallback_is_valid}, question_type={fallback_question_type}")
+                        fallback_response = self._build_fallback_from_raw_json(raw_json, question)
+                        rag_logger.info(f"✅ Fallback response created from raw JSON: is_valid={fallback_response['is_valid']}, question_type={fallback_response['question_type']}")
                         return fallback_response
 
                     except Exception as parse_err:
                         rag_logger.error(f"❌ Could not parse raw JSON: {parse_err}")
-                        # Only if we truly can't parse anything, return a generic error
-                        return {
-                            "is_valid": False,
-                            "reason": "Unable to analyze your question. Please try rephrasing it.",
-                            "question_type": "invalid",
-                            "extracted_ticker": None,
-                            "extracted_tickers": [],
-                            "rephrased_question": "",
-                            "suggested_improvements": ["Try asking about a specific company like $AAPL or $MSFT"],
-                            "confidence": 0.0,
-                            "quarter_reference": None,
-                            "quarter_context": None,
-                            "quarter_count": None,
-                            "data_source": None,
-                            "needs_latest_news": False,
-                            "needs_10k": False,
-                            "original_question": question
-                        }
+                        return self._build_error_fallback(question)
             except Exception as e:
                 rag_logger.error(f"❌ Question analysis failed on attempt {attempt + 1}: {e}")
                 if attempt < max_retries - 1:
@@ -576,63 +564,13 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                     try:
                         import json as json_lib
                         raw_json = json_lib.loads(analysis_text)
-
-                        # CRITICAL: Preserve is_valid from LLM response - don't override!
-                        fallback_is_valid = raw_json.get('is_valid', True)
-                        fallback_reason = raw_json.get('reason', 'Question analysis completed')
-                        fallback_question_type = raw_json.get('question_type', 'multiple_companies')
-                        fallback_needs_news = raw_json.get('needs_latest_news', False)
-                        fallback_needs_10k = raw_json.get('needs_10k', False)
-                        fallback_data_source = raw_json.get('data_source')
-                        fallback_rephrased = raw_json.get('rephrased_question', question)
-                        fallback_suggestions = raw_json.get('suggested_improvements', [])
-                        fallback_confidence = raw_json.get('confidence', 0.5)
-                        fallback_tickers = raw_json.get('extracted_tickers', [])
-                        fallback_ticker = raw_json.get('extracted_ticker')
-
-                        rag_logger.info(f"📋 Extracted from raw response: is_valid={fallback_is_valid}, question_type={fallback_question_type}, data_source={fallback_data_source}")
-
-                        fallback_response = {
-                            "is_valid": fallback_is_valid,
-                            "reason": fallback_reason,
-                            "question_type": fallback_question_type,
-                            "extracted_ticker": fallback_ticker,
-                            "extracted_tickers": fallback_tickers,
-                            "rephrased_question": fallback_rephrased,
-                            "suggested_improvements": fallback_suggestions,
-                            "confidence": fallback_confidence,
-                            "quarter_reference": raw_json.get('quarter_reference'),
-                            "quarter_context": raw_json.get('quarter_context'),
-                            "quarter_count": raw_json.get('quarter_count'),
-                            "data_source": fallback_data_source,
-                            "needs_latest_news": fallback_needs_news,
-                            "needs_10k": fallback_needs_10k,
-                            "original_question": question
-                        }
-
-                        rag_logger.info(f"✅ Fallback response created from raw JSON: is_valid={fallback_is_valid}, question_type={fallback_question_type}")
+                        fallback_response = self._build_fallback_from_raw_json(raw_json, question)
+                        rag_logger.info(f"✅ Fallback response created from raw JSON: is_valid={fallback_response['is_valid']}, question_type={fallback_response['question_type']}")
                         return fallback_response
 
                     except Exception as parse_err:
                         rag_logger.error(f"❌ Could not parse raw JSON: {parse_err}")
-                        # Only if we truly can't parse anything, return a generic error
-                        return {
-                            "is_valid": False,
-                            "reason": "Unable to analyze your question. Please try rephrasing it.",
-                            "question_type": "invalid",
-                            "extracted_ticker": None,
-                            "extracted_tickers": [],
-                            "rephrased_question": "",
-                            "suggested_improvements": ["Try asking about a specific company like $AAPL or $MSFT"],
-                            "confidence": 0.0,
-                            "quarter_reference": None,
-                            "quarter_context": None,
-                            "quarter_count": None,
-                            "data_source": None,
-                            "needs_latest_news": False,
-                            "needs_10k": False,
-                            "original_question": question
-                        }
+                        return self._build_error_fallback(question)
         
         # This should never be reached, but just in case
         raise Exception("Unexpected error in analyze_question retry loop")
@@ -837,16 +775,15 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
     # STAGE 4: QUESTION VALIDATION & PROCESSING
     # ═════════════════════════════════════════════════════════════════════
 
-    async def validate_question(self, question: str, conversation_id: str = None) -> Dict[str, Any]:
-        """Validate a question and return a user-friendly response."""
+    async def process_question(self, question: str, conversation_id: str = None) -> Dict[str, Any]:
+        """Complete question processing pipeline: analyze, validate, and return processed result."""
         analysis = await self.analyze_question(question, conversation_id)
-        
+
         # Check if question is invalid based on AI's assessment
         is_valid = analysis.get("is_valid", False)
-        
+
         # If the AI marked it as invalid, reject it
         if not is_valid:
-            # Use the reason directly from analysis - it already explains what we can help with
             message = analysis.get('reason', 'I can help you analyze public company earnings calls, 10-K SEC filings, and company news.')
             suggestions = analysis.get('suggested_improvements', [
                 "What did $AAPL say about revenue in Q4?",
@@ -861,69 +798,26 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                 "question_type": analysis["question_type"],
                 "original_question": question
             }
-        
-        # Prepare response
-        response = {
-            "status": "accepted",
-            "rephrased_question": analysis["rephrased_question"],
-            "question_type": analysis["question_type"],
-            "confidence": analysis.get("confidence", 0.8),  # Default confidence if not provided
-            "original_question": question,
-            # Include quarter-related fields
-            "quarter_context": analysis.get("quarter_context"),
-            "quarter_count": analysis.get("quarter_count"),
-            "quarter_reference": analysis.get("quarter_reference"),
-            # Include data source routing (PRIMARY FIELD)
-            "data_source": analysis.get("data_source", "earnings_transcripts"),
-            # Include news-related fields (legacy, use data_source instead)
-            "needs_latest_news": analysis.get("needs_latest_news", False),
-            # Include 10-K fields (legacy, use data_source instead)
-            "needs_10k": analysis.get("needs_10k", False)
-        }
-        
+
+        # Extract tickers
         if analysis.get("extracted_tickers"):
-            response["extracted_tickers"] = analysis["extracted_tickers"]
-            response["extracted_ticker"] = analysis["extracted_tickers"][0]
+            extracted_tickers = analysis["extracted_tickers"]
+            extracted_ticker = analysis["extracted_tickers"][0]
         else:
-            response["extracted_ticker"] = analysis.get("extracted_ticker")
-            response["extracted_tickers"] = [analysis.get("extracted_ticker")] if analysis.get("extracted_ticker") else []
+            extracted_ticker = analysis.get("extracted_ticker")
+            extracted_tickers = [extracted_ticker] if extracted_ticker else []
 
-        # DEBUG: Log data_source in validation response
-        rag_logger.info(f"🔍 DEBUG [VALIDATION RESPONSE]: data_source={response.get('data_source')}, needs_10k={response.get('needs_10k')}")
-
-        return response
-    
-    async def process_question(self, question: str, conversation_id: str = None) -> Dict[str, Any]:
-        """Complete question processing pipeline."""
-        # First validate the question
-        validation = await self.validate_question(question, conversation_id)
-        
-        if validation["status"] == "rejected":
-            return validation
-
-        # If accepted, return the processed question
         result = {
             "status": "processed",
             "original_question": question,
-            "processed_question": validation["rephrased_question"],
-            "question_type": validation["question_type"],
-            "extracted_ticker": validation["extracted_ticker"],
-            "extracted_tickers": validation.get("extracted_tickers", [validation["extracted_ticker"]] if validation["extracted_ticker"] else []),
-            "confidence": validation["confidence"],
-            # Include quarter-related fields
-            "quarter_context": validation.get("quarter_context"),
-            "quarter_count": validation.get("quarter_count"),
-            "quarter_reference": validation.get("quarter_reference"),
-            # Include data source routing (PRIMARY FIELD)
-            "data_source": validation.get("data_source", "earnings_transcripts"),
-            # Include news-related fields (legacy, use data_source instead)
-            "needs_latest_news": validation.get("needs_latest_news", False),
-            # Include 10-K fields (legacy, use data_source instead)
-            "needs_10k": validation.get("needs_10k", False)
+            "question_type": analysis["question_type"],
+            "extracted_ticker": extracted_ticker,
+            "extracted_tickers": extracted_tickers,
+            "topic": analysis.get("topic", ""),
+            "time_refs": analysis.get("time_refs", []),
+            "confidence": analysis.get("confidence", 0.8),
+            "user_hints": analysis.get("user_hints", {})
         }
-
-        # DEBUG: Log final data_source being returned
-        rag_logger.info(f"🔍 DEBUG [PROCESS_QUESTION FINAL]: data_source={result.get('data_source')}, needs_10k={result.get('needs_10k')}")
 
         return result
 
@@ -939,40 +833,26 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
         ticker_prompt = get_ticker_rephrasing_prompt(original_question, ticker)
 
         try:
-            # Detailed LLM stage logging for ticker-specific rephrasing
             rag_logger.info(f"🤖 ===== TICKER REPHRASING LLM CALL =====")
-            cerebras_model = self.config.get("cerebras_model", "qwen-3-235b-a22b-instruct-2507")
-            rag_logger.info(f"🔍 Model: {cerebras_model}")
-            rag_logger.info(f"📊 Max tokens: 200")
-            rag_logger.info(f"🌡️ Temperature: 0.3")
+            rag_logger.info(f"🔍 Provider: {self.llm.provider_name}")
             rag_logger.info(f"🎯 Ticker: {ticker}")
             rag_logger.info(f"📝 Original question: {original_question}")
-            rag_logger.info(f"📋 Ticker prompt length: {len(ticker_prompt)} characters")
-            rag_logger.info(f"📋 Ticker prompt preview: {ticker_prompt[:200]}...")
 
             start_time = time.time()
-            response = self.client.chat.completions.create(
-                model=cerebras_model,
-                messages=[
+            ticker_question = self.llm.complete(
+                [
                     {"role": "system", "content": TICKER_REPHRASING_SYSTEM_PROMPT},
                     {"role": "user", "content": ticker_prompt}
                 ],
-                max_completion_tokens=200,
-                temperature=0.3
+                max_tokens=200,
+                temperature=0.3,
+                stream=False,
             )
             call_time = time.time() - start_time
             
-            ticker_question = response.choices[0].message.content.strip()
-            
-            # Detailed response logging
+            ticker_question = ticker_question.strip()
             rag_logger.info(f"✅ ===== TICKER REPHRASING LLM RESPONSE ===== (call time: {call_time:.3f}s)")
-            rag_logger.info(f"📊 Response tokens used: {response.usage.total_tokens if response.usage else 'unknown'}")
-            rag_logger.info(f"📊 Prompt tokens: {response.usage.prompt_tokens if response.usage else 'unknown'}")
-            rag_logger.info(f"📊 Completion tokens: {response.usage.completion_tokens if response.usage else 'unknown'}")
-            if hasattr(response, 'finish_reason'):
-                rag_logger.info(f"🏁 Finish reason: {response.finish_reason}")
             rag_logger.info(f"📝 Rephrased question: {ticker_question}")
-            rag_logger.info(f"✅ Created ticker-specific question: '{ticker_question}'")
             return ticker_question
             
         except Exception as e:

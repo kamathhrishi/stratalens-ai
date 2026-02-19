@@ -456,15 +456,23 @@ class SmartParallelSECFilingsService:
         Returns:
             Dict with sub_questions and search_plan
         """
-        prompt = f"""You are a financial analyst creating a SEARCH STRATEGY for a RAG system.
+        prompt = f"""You are a financial analyst creating a SEARCH STRATEGY for a RAG system that retrieves data from 10-K filings. Do not use emojis in your responses.
 
 QUESTION: {question}
 
-Create a strategic search plan to retrieve ALL information needed.
+Create a strategic search plan with SUB-QUESTIONS that will retrieve SPECIFIC DATA from the 10-K filing.
+
+CRITICAL: Sub-questions must be RAG-FRIENDLY:
+- GOOD: "What is Apple's total revenue, cost of revenue, and gross profit?"
+- GOOD: "What are the operating expense categories and amounts in Apple's income statement?"
+- BAD: "What are standard income statement line items?" (too generic, not retrievable)
+- BAD: "How are income statements categorized?" (conceptual, not data retrieval)
+
+Each sub-question should target SPECIFIC FACTS that can be found in the 10-K filing.
 
 SEARCH TYPES:
-- "table": For quantitative data (revenue, COGS, assets, ratios, metrics)
-- "text": For qualitative info (reasons, explanations, risks, strategies)
+- "table": For quantitative data (revenue, COGS, assets, ratios, metrics, line items)
+- "text": For qualitative info (reasons, explanations, risks, strategies, commentary)
 
 Return ONLY valid JSON:
 {{
@@ -473,13 +481,28 @@ Return ONLY valid JSON:
         "complexity_assessment": "simple|medium|complex"
     }},
     "sub_questions": [
-        "Targeted sub-question 1 (NO company name)",
-        "Targeted sub-question 2"
+        "Specific data-retrieval sub-question 1 (include company name if in original question)",
+        "Specific data-retrieval sub-question 2"
     ],
     "search_plan": [
-        {{"query": "specific search terms", "type": "table|text", "priority": 1}}
+        {{"query": "specific search terms for 10-K retrieval", "type": "table|text", "priority": 1}}
     ]
-}}"""
+}}
+
+EXAMPLES:
+
+Question: "Show me all line items from Apple's income statement"
+Good sub-questions:
+- "What is Apple's total revenue, cost of revenue, and gross profit?"
+- "What are Apple's operating expenses broken down by category?"
+- "What is Apple's income before taxes, provision for taxes, and net income?"
+
+Question: "What is Microsoft's debt-to-equity ratio?"
+Good sub-questions:
+- "What is Microsoft's total debt and total equity from the balance sheet?"
+- "What are Microsoft's long-term and short-term debt amounts?"
+
+Now analyze the original question and create RAG-friendly sub-questions."""
 
         try:
             messages = [
@@ -616,19 +639,33 @@ Return ONLY valid JSON:
         if not all_tables:
             return []
 
-        # Create table summary for LLM
+        # Create table summary for LLM with enhanced metadata
         table_summaries = []
         for i, table in enumerate(all_tables[:50]):  # Limit for prompt size
             path = table.get('path_string', 'Unknown')
-            table_summaries.append(f"{i+1}. {path}")
+            sec_title = table.get('sec_section_title', '')
+            content = table.get('content', '')
 
-        prompt = f"""Select the most relevant tables for: {query}
+            # Create content preview (first 150 chars, prioritize headers/first row)
+            content_preview = content[:150].replace('\n', ' ').strip()
 
-Available tables:
+            # Build rich summary: path | section | preview
+            summary_parts = [f"{i+1}. {path}"]
+            if sec_title and sec_title != 'Unknown':
+                summary_parts.append(f"[Section: {sec_title}]")
+            if content_preview:
+                summary_parts.append(f"[Preview: {content_preview}...]")
+
+            table_summaries.append(" | ".join(summary_parts))
+
+        prompt = f"""Do not use emojis. Select the most relevant tables for this query: "{query}"
+
+Available tables (showing: path | section | content preview):
 {chr(10).join(table_summaries)}
 
-Return JSON with table indices (1-indexed):
-{{"selected_tables": [1, 5, 12], "reasoning": "Why these tables"}}"""
+Analyze the section titles and content previews to identify relevant tables.
+Return JSON with table indices (1-indexed), selecting up to {top_k} tables:
+{{"selected_tables": [1, 5, 12], "reasoning": "Brief explanation of why these tables match the query"}}"""
 
         try:
             messages = [
@@ -771,7 +808,7 @@ Return JSON with table indices (1-indexed):
             chunk_count = section.get('chunk_count', 0)
             section_summaries.append(f"{i}. {sec_id} - {sec_title} ({chunk_count} chunks)")
 
-        prompt = f"""Select the most relevant SEC 10-K sections for this question: {query}
+        prompt = f"""Do not use emojis. Select the most relevant SEC 10-K sections for this question: {query}
 
 Available sections:
 {chr(10).join(section_summaries)}
@@ -856,7 +893,7 @@ IMPORTANT: Select 1-3 sections maximum. Be selective."""
         context = "\n---\n".join(context_parts)
 
         if previous_answer:
-            prompt = f"""Refine the answer based on new information.
+            prompt = f"""Do not use emojis. Refine the answer based on new information.
 
 QUESTION: {question}
 
@@ -871,7 +908,7 @@ NEW INFORMATION:
 
 Integrate new data, cite sources [Source X], provide precise numbers."""
         else:
-            prompt = f"""Answer the question using the retrieved data.
+            prompt = f"""Do not use emojis. Answer the question using the retrieved data.
 
 QUESTION: {question}
 
@@ -885,7 +922,7 @@ Cite sources [Source X], provide precise numbers, note any missing info."""
 
         try:
             messages = [
-                {"role": "system", "content": "Expert financial analyst. Cite sources, be precise."},
+                {"role": "system", "content": "Expert financial analyst. Do not use emojis. Cite sources, be precise."},
                 {"role": "user", "content": prompt}
             ]
 
@@ -902,7 +939,7 @@ Cite sources [Source X], provide precise numbers, note any missing info."""
         chunks: List[Dict]
     ) -> Dict:
         """Evaluate answer quality and identify gaps."""
-        prompt = f"""Evaluate this financial analysis answer.
+        prompt = f"""Do not use emojis. Evaluate this financial analysis answer.
 
 QUESTION: {question}
 
@@ -957,7 +994,7 @@ Return JSON:
 
         executed_queries = [item.get('query', '') for item in current_search_plan]
 
-        prompt = f"""Generate NEW searches to fill gaps.
+        prompt = f"""Do not use emojis. Generate NEW searches to fill gaps.
 
 QUESTION: {question}
 
@@ -990,7 +1027,10 @@ Return JSON with 1-3 NEW searches:
             return []
 
     def format_10k_context(self, chunks: List[Dict]) -> str:
-        """Format chunks for context display."""
+        """Format chunks for context display. Uses [10K-1], [10K-2] markers to match
+        get_10k_citations() so in-text citations are clickable in the frontend.
+        When multiple fiscal years are present, labels each chunk with FY so the model
+        can structure multi-year answers (e.g. 'FY2020 ... FY2021 ...')."""
         if not chunks:
             return "No relevant 10-K data found."
 
@@ -999,7 +1039,10 @@ Return JSON with 1-3 NEW searches:
             chunk_type = chunk.get('type', 'unknown').upper()
             section = chunk.get('sec_section_title', 'SEC Filing')
             content = chunk.get('content', '')[:1500]
-            parts.append(f"[{i}] [{chunk_type}] {section}\n{content}")
+            fy = chunk.get('fiscal_year', '')
+            fy_label = f" FY{fy}" if fy else ""
+            # Use [10K-1], [10K-2] to match citation markers sent to frontend
+            parts.append(f"SOURCE [10K-{i}] [{chunk_type}]{fy_label} {section}\n{content}")
 
         return "\n\n---\n\n".join(parts)
 
@@ -1017,6 +1060,7 @@ Return JSON with 1-3 NEW searches:
                 'chunk_text': chunk.get('content', '')[:500],  # Include chunk text for frontend
                 'chunk_type': chunk.get('type', 'text'),  # table or text
                 'marker': f"[10K-{i}]",  # Citation marker
-                'preview': chunk.get('content', '')[:200]
+                'preview': chunk.get('content', '')[:200],
+                'char_offset': chunk.get('char_offset'),  # Character offset for precise highlighting
             })
         return citations

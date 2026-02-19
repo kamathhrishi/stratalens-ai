@@ -9,7 +9,7 @@ including text processing, JSON repair, keyword extraction, and ticker extractio
 import json
 import re
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -369,6 +369,80 @@ def generate_user_friendly_limit_message(limits_exceeded: Dict[str, Any]) -> str
         return "⚠️ " + " ".join(messages) + "\n\n"
     
     return ""
+
+
+def deduplicate_citations_and_chunks(
+    best_citations: List[Any],
+    best_chunks: List[Dict[str, Any]],
+    logger_instance: Optional[logging.Logger] = None,
+) -> Tuple[List[Any], List[Dict[str, Any]]]:
+    """
+    Deduplicate citations and chunks from iterative improvement results.
+    Returns (unique_citations, unique_chunks) for use in final response.
+    """
+    log = logger_instance or logger
+
+    unique_citations = []
+    seen_citations = set()
+
+    news_in_best = [c for c in best_citations if isinstance(c, dict) and c.get('type') == 'news']
+    tenk_in_best = [c for c in best_citations if isinstance(c, dict) and c.get('type') == '10-K']
+    log.info(
+        f"🔍 DEBUG: best_citations contains {len(news_in_best)} news citations, "
+        f"{len(tenk_in_best)} 10-K citations, {len(best_citations)} total"
+    )
+
+    for citation in best_citations:
+        citation_key = citation
+        if isinstance(citation, dict):
+            if citation.get('type') == 'news':
+                citation_key = citation.get('marker', citation.get('url', str(citation)))
+                log.debug(
+                    f"🔍 Processing news citation: marker={citation.get('marker')}, "
+                    f"url={citation.get('url', '')[:50] if citation.get('url') else 'None'}"
+                )
+            elif citation.get('type') == '10-K':
+                citation_key = citation.get('marker', str(citation))
+            else:
+                citation_key = (
+                    citation.get('citation') or citation.get('id')
+                    or citation.get('chunk_index') or str(citation)
+                )
+
+        if citation_key not in seen_citations:
+            seen_citations.add(citation_key)
+            unique_citations.append(citation)
+            if isinstance(citation, dict) and citation.get('type') == 'news':
+                log.info(f"✅ Added news citation to unique_citations: {citation.get('marker')}")
+        elif isinstance(citation, dict) and citation.get('type') == 'news':
+            log.warning(
+                f"⚠️ Duplicate news citation skipped: {citation.get('marker')}, "
+                f"url={citation.get('url', '')[:50] if citation.get('url') else 'None'}"
+            )
+
+    unique_chunks = []
+    seen_chunk_citations = set()
+
+    for chunk in best_chunks:
+        chunk_citation = chunk.get('citation')
+        if isinstance(chunk_citation, dict):
+            chunk_citation = (
+                chunk_citation.get('citation') or chunk_citation.get('id')
+                or chunk_citation.get('chunk_index') or str(chunk_citation)
+            )
+        if chunk_citation not in seen_chunk_citations:
+            seen_chunk_citations.add(chunk_citation)
+            unique_chunks.append(chunk)
+
+    log.info(
+        f"📎 Deduplicated citations: {len(best_citations)} -> {len(unique_citations)} "
+        f"unique citations from all iterations"
+    )
+    log.info(
+        f"📄 Deduplicated chunks: {len(best_chunks)} -> {len(unique_chunks)} "
+        f"unique chunks from all iterations"
+    )
+    return (unique_citations, unique_chunks)
 
 
 def combine_search_results(vector_results: List[Dict[str, Any]], keyword_results: List[Dict[str, Any]], 

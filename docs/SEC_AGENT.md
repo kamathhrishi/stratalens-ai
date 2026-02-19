@@ -5,16 +5,14 @@ The SEC Agent provides sophisticated access to annual 10-K SEC filings using **p
 ## Table of Contents
 
 - [Overview](#overview)
-- [Architecture Evolution](#architecture-evolution)
-- [SmartParallel Architecture (Current)](#smartparallel-architecture-current)
+- [Architecture](#architecture)
 - [Step-by-Step Flow](#step-by-step-flow)
 - [Key Design Decisions](#key-design-decisions)
 - [Configuration](#configuration)
-- [Switching Between Versions](#switching-between-versions)
+- [Version in Use](#version-in-use)
 - [Database Schema](#database-schema)
 - [Examples](#examples)
 - [Benchmark Results](#benchmark-results)
-- [Legacy: Iterative Architecture](#legacy-iterative-architecture)
 
 ---
 
@@ -40,33 +38,7 @@ Avg Iters:    2.4 iterations (out of max 5)
 
 ---
 
-## Architecture Evolution
-
-The SEC agent evolved through experimentation to achieve optimal accuracy/speed balance:
-
-```
-Version 1: One-Pass (sec_filings_service.py)
-├── Simple: Fetch everything at once
-├── Fast but low accuracy
-└── Status: DEPRECATED
-
-Version 2: Iterative (sec_filings_service_iterative.py)
-├── Step-by-step: TABLE or TEXT at each iteration
-├── Good accuracy (~91%) but slow (~170s/question)
-└── Status: LEGACY (available as fallback)
-
-Version 3: SmartParallel (sec_filings_service_smart_parallel.py)  ← CURRENT
-├── Planning-driven: Generate sub-questions first
-├── Parallel: Execute all searches concurrently
-├── 91% accuracy, ~10s/question (16x faster than Iterative)
-└── Status: PRODUCTION
-```
-
-The key insight: The iterative approach was slow because it ran searches sequentially. SmartParallel generates sub-questions upfront and executes them in parallel.
-
----
-
-## SmartParallel Architecture (Current)
+## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
@@ -197,7 +169,7 @@ def plan_investigation_with_search_strategy(self, question, model):
     """
 ```
 
-**Why this matters:** The original iterative approach searched with the SAME original question every iteration, getting identical text search results. SmartParallel uses DIFFERENT targeted queries.
+**Why this matters:** Using targeted sub-questions instead of the original question retrieves different, specific information for each information need.
 
 ### Phase 1: Parallel Retrieval
 
@@ -342,7 +314,7 @@ DATABASE_URL=postgresql://...# 10-K chunks and tables
 ### Agent Settings
 
 ```python
-# In SmartParallelSECFilingsService
+# In The agentSECFilingsService
 max_iterations = 5           # Maximum iterations per question
 confidence_threshold = 0.90  # Quality score for early termination
 parallel_workers = 6         # ThreadPoolExecutor workers
@@ -354,36 +326,13 @@ tfidf_weight = 0.30
 
 ---
 
-## Switching Between Versions
+## Version in Use
 
-### Use SmartParallel (Current Default)
+Loaded in `agent/rag/rag_agent.py`:
 
 ```python
-# In agent/rag/rag_agent.py
 from .sec_filings_service_smart_parallel import SmartParallelSECFilingsService as SECFilingsService
 ```
-
-### Use Iterative (Legacy)
-
-```python
-# In agent/rag/rag_agent.py
-from .sec_filings_service_iterative import IterativeSECFilingsService as SECFilingsService
-```
-
-### Use One-Pass (Deprecated)
-
-```python
-# In agent/rag/rag_agent.py
-from .sec_filings_service import SECFilingsService
-```
-
-### Files
-
-| File | Version | Status | Description |
-|------|---------|--------|-------------|
-| `sec_filings_service_smart_parallel.py` | SmartParallel | **CURRENT** | Planning + parallel retrieval |
-| `sec_filings_service_iterative.py` | Iterative | Legacy | Sequential table/text decisions |
-| `sec_filings_service.py` | One-Pass | Deprecated | Simple one-pass approach |
 
 ---
 
@@ -535,18 +484,16 @@ Result: 2 iterations, ~14 seconds
 
 ### FinanceBench Evaluation (112 10-K Questions)
 
-| Version | Accuracy | Avg Time | Avg Iterations |
-|---------|----------|----------|----------------|
-| SmartParallel (Current) | **91%** | **10.7s** | 2.4 |
-| Iterative (Legacy) | 91.3% | 169s | 5.8 |
-| Speed-Optimized Iterative | 80.4% | 139s | 4.2 |
-
-**Key Insight:** SmartParallel achieves the same accuracy as Iterative but is **16x faster**.
+| Metric | Result |
+|--------|--------|
+| Accuracy | **91%** |
+| Avg Time | **10.7s** per question |
+| Avg Iterations | 2.4 (out of max 5) |
 
 ### Performance Breakdown
 
 ```
-SmartParallel timing per question:
+Timing per question:
 ├── Phase 0 (Planning):     ~1.5s
 ├── Phase 1 (Retrieval):    ~3.5s (parallel)
 ├── Phase 2 (Answer):       ~2.5s
@@ -556,39 +503,15 @@ SmartParallel timing per question:
 With 2.4 avg iterations: ~10.7s total
 ```
 
-### Why SmartParallel is Faster
+### Why It's Fast
 
-1. **Parallel execution** - 6 searches run concurrently vs sequentially
-2. **Better planning** - Targeted sub-questions find relevant data faster
+1. **Parallel execution** - 6 searches run concurrently
+2. **Targeted sub-questions** - Each query retrieves different, specific information
 3. **Fewer iterations** - Better initial retrieval means earlier termination
-4. **No wasted searches** - Each query targets specific information
-
----
-
-## Legacy: Iterative Architecture
-
-The iterative approach (still available as fallback) works differently:
-
-```
-FOR EACH ITERATION (max 5):
-  1. Decide: TABLE or TEXT? (LLM decision)
-  2. Retrieve chunks (one type only)
-  3. Generate/refine answer
-  4. Evaluate quality
-  5. If quality >= 90%: STOP
-  6. Decide next strategy based on evaluation
-```
-
-**Pros:** Fine-grained control, can course-correct
-**Cons:** Sequential = slow, same query repeated = redundant searches
-
-See `experiments/sec_filings_rag_scratch/docs/AGENT_INTERNALS_DEEP_DIVE.md` for detailed technical documentation of the iterative approach.
 
 ---
 
 ## Related Documentation
 
 - **[Agent README](../agent/README.md)** - Full agent architecture
-- **[Agent Internals Deep Dive](../experiments/sec_filings_rag_scratch/docs/AGENT_INTERNALS_DEEP_DIVE.md)** - Technical internals
-- **[Optimization Findings](../experiments/sec_filings_rag_scratch/docs/OPTIMIZATION_FINDINGS.md)** - Performance analysis
 - **[Data Ingestion](../agent/rag/data_ingestion/README.md)** - 10-K ingestion pipeline

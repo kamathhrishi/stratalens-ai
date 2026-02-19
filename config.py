@@ -69,11 +69,11 @@ class SecurityConfig:
 @dataclass
 class RateLimitingConfig:
     """Rate limiting configuration."""
-    
+
     # Rate limits
-    PER_MINUTE: int = 3
-    PER_MONTH: int = 20
-    ADMIN_PER_MONTH: int = 1000
+    PER_MINUTE: int = 30
+    PER_MONTH: int = 10000
+    ADMIN_PER_MONTH: int = 100000
     
     # Billing
     COST_PER_REQUEST: float = 0.02  # $0.02 per request

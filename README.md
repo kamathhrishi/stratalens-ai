@@ -35,11 +35,11 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
                  │                  RETRIEVAL LAYER                     │
                  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
                  │  │  Earnings   │  │  SEC 10-K   │  │   Tavily    │  │
-                 │  │ Transcripts │  │   Filings   │  │    News     │  │
-                 │  │             │  │             │  │             │  │
-                 │  │ Vector DB   │  │ Section     │  │  Live API   │  │
-                 │  │ + Hybrid    │  │ Routing +   │  │             │  │
-                 │  │   Search    │  │ Reranking   │  │             │  │
+                 │  │ Transcripts │  │  Retrieval  │  │    News     │  │
+                 │  │             │  │   Agent     │  │             │  │
+                 │  │ Vector DB   │  │ (10-K only) │  │  Live API   │  │
+                 │  │ + Hybrid    │  │ Planning +  │  │             │  │
+                 │  │   Search    │  │  Iterative  │  │             │  │
                  │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  │
                  └─────────┴───────────┬────┴────────────────┴─────────┘
                                        │ ▲
@@ -65,10 +65,12 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
 ```
 
 **Key Concepts:**
-1. **Semantic Routing** - Routes to data sources based on question **intent**, not just keywords
+1. **Semantic Routing** - Routes to data sources based on question **intent**, not keywords
 2. **Research Planning** - Agent explains reasoning before searching ("I need to find...")
 3. **Multi-Source RAG** - Combines earnings transcripts, SEC 10-K filings, and news
-4. **Self-Reflection** - Evaluates answer quality and iterates until confident (≥90%)
+4. **Self-Reflection** - Evaluates answer quality and iterates until confident
+5. **Answer Modes** - Configurable iteration depth (2-10 iterations) and quality thresholds (70-95%)
+6. **Search-Optimized Follow-ups** - Generates keyword phrases for better RAG retrieval
 
 **Benchmark:** 91% accuracy on [FinanceBench](https://github.com/patronus-ai/financebench) (112 10-K questions), ~10s per question, evaluated using LLM-as-a-judge.
 
@@ -84,9 +86,10 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
 
 ## Features
 
-- **Earnings Transcripts** (2022-2025) - Word-for-word executive commentary
-- **SEC Filings** (10K of 2024-25) - Official 10-K and 10-Q reports
-- **Financial Screener** - Natural language queries over company fundamentals [not in production]
+- **Earnings Transcripts** (2022-2025) - Word-for-word executive commentary from earnings calls
+- **SEC 10-K Filings** (2024-25) - Official annual reports via specialized retrieval agent (10-Q/8-K coming soon)
+- **Real-Time News** - Latest market developments via Tavily search
+- **Financial Screener** - Natural language queries over company fundamentals [in development]
 
 Unlike generic LLMs that rely on web content, StrataLens uses the same authoritative documents that professional analysts depend on.
 
@@ -102,10 +105,13 @@ Unlike generic LLMs that rely on web content, StrataLens uses the same authorita
 ```
 stratalens_ai/
 ├── agent/                  # AI agent & RAG system         → see agent/README.md
+│   ├── __init__.py        # Public API: Agent, RAGAgent, create_agent()
+│   ├── agent_config.py    # Iteration/quality threshold settings
+│   ├── prompts.py         # Centralized LLM prompt templates
+│   ├── llm/               # Unified LLM client (OpenAI/Cerebras)  → see agent/llm/README.md
 │   ├── rag/               # RAG implementation
-│   │   ├── rag_agent.py            # Main orchestration (2,700+ lines)
-│   │   ├── sec_filings_service_smart_parallel.py  # 10-K agent (current)
-│   │   ├── sec_filings_service_iterative.py       # 10-K agent (legacy)
+│   │   ├── rag_agent.py                          # Main orchestration
+│   │   ├── sec_filings_service_smart_parallel.py  # SEC 10-K agent
 │   │   ├── response_generator.py   # LLM response & evaluation
 │   │   ├── question_analyzer.py    # Semantic routing
 │   │   ├── search_engine.py        # Hybrid transcript search
@@ -114,16 +120,10 @@ stratalens_ai/
 │   └── screener/          # Financial screener
 ├── app/                   # FastAPI application
 │   ├── routers/           # API endpoints
-│   ├── schemas/           # Pydantic models
-│   └── auth/              # Authentication
+│   └── schemas/           # Pydantic models
 ├── frontend/              # React + TypeScript frontend
 ├── docs/                  # Documentation
 │   └── SEC_AGENT.md       # 10-K agent deep dive
-├── analytics/             # Usage analytics
-└── experiments/           # Development & benchmarking (gitignored)
-    ├── sec_filings_rag_scratch/   # Agent evolution & benchmark results
-    ├── sec_filings_rag/           # Hierarchical parsing experiments
-    └── llamaindex_agent/          # LlamaIndex alternative approach
 ```
 
 ## Quick Start
@@ -152,27 +152,24 @@ cp .env.example .env
 
 ### Configuration
 
-Before running the application, configure the following files based on your environment:
+Before running the application, configure the following in `.env`:
 
-**Backend (`.env`):**
-- `BASE_URL` - Set to your server URL (e.g., `localhost:8000` for local, your production URL for deployment)
+- `BASE_URL` - Set to your server URL (e.g., `http://localhost:8000` for local, your production URL for deployed)
 - `RAG_DEBUG_MODE` - Set to `false` for production, `true` for development debugging
-- `ENABLE_LOGIN` / `ENABLE_SELF_SERVE_REGISTRATION` - Toggle authentication features as needed
+- `AUTH_DISABLED` - Set to `true` to bypass Clerk auth (dev only), `false` for production
+- `CLERK_SECRET_KEY` / `CLERK_PUBLISHABLE_KEY` - Required for production authentication (get from Clerk Dashboard)
 
-**Frontend (`frontend/config.js`):**
-- `ENVIRONMENT` - Set to `'local'` for development or `'production'` for deployment
-- Update the `ENVIRONMENTS.production` URLs to match your production server
+Frontend env vars (read from root `.env` via `envDir: '../'` in `vite.config.ts`):
+- `VITE_CLERK_PUBLISHABLE_KEY` - Same value as `CLERK_PUBLISHABLE_KEY` (Vite requires `VITE_` prefix)
+- `VITE_API_BASE_URL` - Leave empty for same-origin requests (default); set to an explicit URL only if backend is on a separate domain
 
 ```bash
-# Initialize database
-python utils/database_init.py
-
-# Ingest data (optional - see data_ingestion/README.md)
-python agent/rag/data_ingestion/create_tables.py
+# Ingest data (optional - see agent/rag/data_ingestion/README.md)
 python agent/rag/data_ingestion/download_transcripts.py
+python agent/rag/data_ingestion/ingest_10k_to_database.py --ticker AAPL
 
 # Run server
-python fastapi_server.py
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Access the application at `http://localhost:8000`
@@ -186,9 +183,9 @@ Access the application at `http://localhost:8000`
 | OpenAI | `OPENAI_API_KEY` | Yes |
 | Cerebras | `CEREBRAS_API_KEY` | Yes |
 | API Ninjas | `API_NINJAS_KEY` | Yes |
+| Clerk | `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY` | Yes (production) |
 | Tavily | `TAVILY_API_KEY` | Optional |
 | Logfire | `LOGFIRE_TOKEN` | Optional |
-| Google OAuth | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional |
 
 ### Database
 
@@ -213,33 +210,15 @@ See `requirements.txt` for full list.
 
 ## Data Sources
 
-All downloaded data is stored in `agent/rag/data_downloads/` (gitignored):
-- Earnings transcripts (~1-2GB per 1000 companies)
-- Vector embeddings (~500MB per 1000 companies)
-- SEC filings (~5-10GB per 500 companies)
-
-See `agent/rag/data_ingestion/README.md` for detailed ingestion instructions.
+Data is split between PostgreSQL (embeddings, metadata) and Railway S3 (full filing documents, transcript text). See `agent/rag/data_ingestion/README.md` for detailed ingestion instructions.
 
 ## AI Agent Documentation
 
-For detailed documentation on the AI agent architecture and RAG system:
-
 | Document | Description |
 |----------|-------------|
-| **[agent/README.md](agent/README.md)** | Complete agent architecture, 6-stage pipeline, semantic routing, iterative self-improvement |
-| **[docs/SEC_AGENT.md](docs/SEC_AGENT.md)** | SEC 10-K agent: SmartParallel architecture, planning-driven retrieval, 91% accuracy |
-| **[agent/rag/data_ingestion/README.md](agent/rag/data_ingestion/README.md)** | Data ingestion pipelines for transcripts, embeddings, and SEC filings |
-
-### Experiments & Development History
-
-The agent evolved through extensive experimentation (in `experiments/` folder):
-
-| Experiment | Description |
-|------------|-------------|
-| `sec_filings_rag_scratch/` | Original 10-K agent development, benchmark results, optimization analysis |
-| `sec_filings_rag/` | Hierarchical parsing experiments |
-| `llamaindex_agent/` | Alternative LlamaIndex-based implementation |
-| `benchmarks/` | FinanceBench evaluation framework |
+| **[agent/README.md](agent/README.md)** | Complete agent architecture, pipeline stages, semantic routing, iterative self-improvement |
+| **[docs/SEC_AGENT.md](docs/SEC_AGENT.md)** | SEC 10-K agent: planning-driven retrieval, 91% accuracy on FinanceBench |
+| **[agent/rag/data_ingestion/README.md](agent/rag/data_ingestion/README.md)** | Data ingestion pipelines for transcripts and SEC filings |
 
 ## Development Status
 

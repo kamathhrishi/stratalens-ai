@@ -48,12 +48,14 @@ export default function ChatInput({
     }
   }
 
-  // Auto-resize textarea
+  // Auto-resize textarea up to ~300px, then scroll
   useEffect(() => {
-    if (inputRef.current) {
-      inputRef.current.style.height = 'auto'
-      inputRef.current.style.height = `${Math.min(inputRef.current.scrollHeight, 150)}px`
-    }
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    const newHeight = Math.min(el.scrollHeight, 300)
+    el.style.height = `${newHeight}px`
+    el.style.overflowY = el.scrollHeight > 300 ? 'auto' : 'hidden'
   }, [value])
 
   const isLarge = size === 'large'
@@ -74,9 +76,9 @@ export default function ChatInput({
         placeholder={placeholder}
         disabled={isLoading}
         rows={1}
-        className={`flex-1 resize-none bg-transparent border-none outline-none placeholder:text-slate-400 text-[#0a1628] ${
+        className={`flex-1 resize-none bg-transparent border-none outline-none placeholder:text-slate-400 text-[#0a1628] overflow-hidden ${
           isLarge ? 'text-lg' : 'text-base'
-        } scrollbar-thin`}
+        }`}
       />
       <button
         onClick={handleSubmit}

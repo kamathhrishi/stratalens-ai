@@ -5,7 +5,6 @@ import {
   MessageSquare,
   Building2,
   Filter,
-  Layers,
   LineChart,
   Lock,
   ChevronLeft,
@@ -15,6 +14,7 @@ import {
   Info,
   Plus,
   Clock,
+  Briefcase,
 } from 'lucide-react'
 import StrataLensLogo from './StrataLensLogo'
 import AboutModal from './AboutModal'
@@ -43,21 +43,21 @@ const sidebarItems: SidebarItem[] = [
     label: 'Companies',
     icon: <Building2 className="w-5 h-5" />,
     path: '/companies',
-    authRequired: true,
+    authRequired: false,
   },
   {
     id: 'screener',
     label: 'Screener',
     icon: <Filter className="w-5 h-5" />,
     path: '/screener',
-    authRequired: true,
+    authRequired: false,
   },
   {
-    id: 'collections',
-    label: 'Collections',
-    icon: <Layers className="w-5 h-5" />,
-    path: '/collections',
-    authRequired: true,
+    id: 'portfolio',
+    label: 'Portfolio',
+    icon: <Briefcase className="w-5 h-5" />,
+    path: '/portfolio',
+    authRequired: false,
   },
   {
     id: 'charting',
@@ -297,7 +297,7 @@ export default function Sidebar({
       {/* Desktop sidebar */}
       <motion.aside
         initial={false}
-        animate={{ width: isCollapsed ? 72 : 240 }}
+        animate={{ width: isCollapsed ? 60 : 220 }}
         transition={{ duration: 0.2 }}
         className="hidden lg:block fixed left-0 top-0 bottom-0 bg-white border-r border-slate-200/60 z-30"
       >

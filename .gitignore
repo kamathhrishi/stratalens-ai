@@ -1,6 +1,12 @@
 # Environment variables
 .env
 
+# One-time migration/backfill scripts (already complete, kept locally for reference)
+agent/rag/data_ingestion/migrate_filings_to_bucket.py
+agent/rag/data_ingestion/migrate_transcripts_to_bucket.py
+agent/rag/data_ingestion/backfill_complete_filings.py
+agent/rag/data_ingestion/backfill_10k_2019_2025.py
+
 # DuckDB database files
 *.duckdb
 financial_data_new.duckdb
@@ -116,4 +122,8 @@ agent/rag/sec_filings_rag_scr/
 
 # All experiments (benchmarks, evaluation, testing)
 experiments/
+
+# Documentation (ignore all except SEC_AGENT.md which is linked in README)
+docs/
+!docs/SEC_AGENT.md
 

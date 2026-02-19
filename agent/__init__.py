@@ -10,15 +10,16 @@ This module provides a unified agent that handles:
 Simplified architecture with no circular dependencies.
 """
 
-# New simplified Agent
-from .agent import Agent, create_agent
+from .rag.rag_agent import RAGAgent
 
-# Backward compatibility: alias AgentSystem to Agent
-AgentSystem = Agent
-create_agent_system = create_agent
+# Public API: RAGAgent is the main class, aliased as Agent for backward compat
+Agent = RAGAgent
+AgentSystem = RAGAgent
+
+def create_agent():
+    return RAGAgent()
 
 # Keep prompts
 from . import prompts
 
-__all__ = ['Agent', 'create_agent', 'AgentSystem', 'create_agent_system', 'prompts']
-
+__all__ = ['Agent', 'RAGAgent', 'AgentSystem', 'create_agent', 'prompts']

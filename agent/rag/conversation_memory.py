@@ -23,11 +23,16 @@ _db_connection_context: ContextVar[Optional[asyncpg.Connection]] = ContextVar('d
 # ═════════════════════════════════════════════════════════════════════
 
 class ConversationMemory:
-    """Enhanced conversation memory for question analysis context with balanced user/AI messages."""
-    
-    def __init__(self, max_messages: int = 4, max_chars_per_message: int = 100):
-        self.max_messages = max_messages  # Total messages to keep (4 = 2 user + 2 AI)
-        self.max_chars_per_message = max_chars_per_message  # 100 chars max per message
+    """Stateful conversation memory with a sliding window of the last N exchanges (user + assistant pairs)."""
+
+    # Sliding window: last 5 conversations = 5 user + 5 assistant = 10 messages
+    DEFAULT_MAX_EXCHANGES = 5
+    MESSAGES_PER_EXCHANGE = 2  # user + assistant
+
+    def __init__(self, max_exchanges: int = None, max_chars_per_message: int = 250):
+        self.max_exchanges = max_exchanges or self.DEFAULT_MAX_EXCHANGES
+        self.max_messages = self.max_exchanges * self.MESSAGES_PER_EXCHANGE  # sliding window size
+        self.max_chars_per_message = max_chars_per_message
         self.conversations: Dict[str, List[Dict[str, Any]]] = {}  # conversation_id -> messages
     
     def set_database_connection(self, db_connection):
@@ -63,7 +68,7 @@ class ConversationMemory:
         
         self.conversations[conversation_id].append(message_data)
         
-        # Keep only the most recent messages
+        # Sliding window: keep only the most recent N messages (last N/2 exchanges)
         if len(self.conversations[conversation_id]) > self.max_messages:
             self.conversations[conversation_id] = self.conversations[conversation_id][-self.max_messages:]
     
@@ -133,55 +138,52 @@ class ConversationMemory:
             
             context_parts.append(f"{role_emoji} {role_label}: {msg['content']}{truncation_note}")
         
-        return f"Recent conversation context ({len(messages)} messages):\n" + "\n".join(context_parts)
+        return f"Recent conversation context (last {len(messages)} messages, sliding window of up to {self.max_exchanges} exchanges):\n" + "\n".join(context_parts)
 
     async def _get_database_conversation_context(self, conversation_id: str) -> str:
-        """Retrieve conversation context from database for the last 8 messages (4 exchanges) from this specific conversation thread."""
+        """Retrieve conversation context from database: last N messages (sliding window of max_exchanges)."""
         try:
-            # Import uuid module
             import uuid
-            
-            # Convert conversation_id to UUID for database query
+
             try:
                 conv_uuid = uuid.UUID(conversation_id)
             except (ValueError, AttributeError):
                 logger.warning(f"⚠️ Invalid conversation_id format: {conversation_id}, cannot retrieve conversation context")
                 return ""
-            
-            # Get the last 8 messages from chat_messages table for THIS conversation thread
-            logger.info(f"📚 Fetching conversation context from database for conversation: {conversation_id}")
+
+            logger.info(f"📚 Fetching conversation context from database for conversation: {conversation_id} (last {self.max_messages} messages)")
             messages = await self.db_connection.fetch('''
                 SELECT role, content, created_at
-                FROM chat_messages 
+                FROM chat_messages
                 WHERE conversation_id = $1
-                ORDER BY created_at DESC 
-                LIMIT 8
-            ''', conv_uuid)
-            
+                ORDER BY created_at DESC
+                LIMIT $2
+            ''', conv_uuid, self.max_messages)
+
             if not messages:
                 logger.info(f"📚 No conversation history found in database for conversation: {conversation_id}")
                 return ""
-            
+
             logger.info(f"📚 Found {len(messages)} messages in database for conversation: {conversation_id}")
-            
-            # Format messages as context (reverse order to show chronological)
+
             context_parts = []
             for i, msg in enumerate(reversed(messages)):
                 role_emoji = "👤" if msg['role'] == "user" else "🤖"
                 role_label = "User" if msg['role'] == "user" else "Assistant"
-                
-                # Truncate to 100 chars
-                content = msg['content'][:100]
-                if len(msg['content']) > 100:
+
+                content = msg['content'][: self.max_chars_per_message]
+                if len(msg['content']) > self.max_chars_per_message:
                     content += "..."
-                
+
                 context_parts.append(f"{role_emoji} {role_label}: {content}")
-                
-                # Log the first message for debugging
+
                 if i == 0:
                     logger.info(f"📚 First message - {role_label}: {content[:50]}...")
-            
-            formatted_context = f"Recent conversation context ({len(messages)} messages):\n" + "\n".join(context_parts)
+
+            formatted_context = (
+                f"Recent conversation context (last {len(messages)} messages, sliding window of up to {self.max_exchanges} exchanges):\n"
+                + "\n".join(context_parts)
+            )
             logger.info(f"📚 Formatted conversation context length: {len(formatted_context)} chars")
             return formatted_context
             

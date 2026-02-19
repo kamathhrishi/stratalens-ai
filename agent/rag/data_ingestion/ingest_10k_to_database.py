@@ -41,21 +41,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 from functools import partial
 import signal
 
-# Import finqual for clean financial statements
-try:
-    import finqual as fq
-    FINQUAL_AVAILABLE = True
-except ImportError:
-    FINQUAL_AVAILABLE = False
-    logging.warning("⚠️ finqual not available - will skip fetching clean financial statements")
-
 # Import the sophisticated data loading module
 sys.path.insert(0, str(Path(__file__).parent))
 from ingest_10k_filings_full import (
     DataProcessor,
     download_and_extract_10k,
+    download_and_extract_filing,
     create_embeddings_for_filing_data,
-    FINANCEBENCH_COMPANIES
+    FINANCEBENCH_COMPANIES,
+    FILING_TYPE_SECTIONS,
 )
 
 # Load environment variables
@@ -224,13 +218,63 @@ class DatabaseIntegration:
             """)
             conn.commit()
 
+            # Create complete_sec_filings table for storing full documents
+            logger.info("   Creating complete_sec_filings table...")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS complete_sec_filings (
+                    id SERIAL PRIMARY KEY,
+                    ticker VARCHAR(10) NOT NULL,
+                    company_name VARCHAR(255),
+                    filing_type VARCHAR(10) NOT NULL,
+                    fiscal_year INTEGER NOT NULL,
+                    quarter INTEGER,
+                    filing_date DATE,
+                    filing_period VARCHAR(50),
+                    document_text TEXT NOT NULL,
+                    document_html TEXT,
+                    document_length INTEGER,
+                    sections JSONB,
+                    section_offsets JSONB,
+                    accession_number VARCHAR(50),
+                    cik VARCHAR(20),
+                    form_type VARCHAR(10),
+                    source_url TEXT,
+                    cache_path TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(ticker, filing_type, fiscal_year, quarter, filing_date)
+                );
+            """)
+            conn.commit()
+            logger.info("   ✅ complete_sec_filings table created/verified")
+
+            # Create indexes for complete_sec_filings
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sec_filings_ticker
+                ON complete_sec_filings(ticker);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sec_filings_ticker_type_year
+                ON complete_sec_filings(ticker, filing_type, fiscal_year);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sec_filings_filing_date
+                ON complete_sec_filings(filing_date);
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sec_filings_accession
+                ON complete_sec_filings(accession_number);
+            """)
+            conn.commit()
+            logger.info("   ✅ Indexes created for complete_sec_filings")
+
             logger.info("✅ Database tables ensured successfully")
 
             # Verify tables exist
             cursor.execute("""
                 SELECT table_name FROM information_schema.tables
                 WHERE table_schema = 'public'
-                AND table_name IN ('ten_k_chunks', 'ten_k_tables')
+                AND table_name IN ('ten_k_chunks', 'ten_k_tables', 'complete_sec_filings')
             """)
             existing_tables = [row[0] for row in cursor.fetchall()]
             logger.info(f"   Verified tables: {existing_tables}")
@@ -244,7 +288,7 @@ class DatabaseIntegration:
             if cursor:
                 cursor.close()
 
-    def store_chunks(self, ticker: str, fiscal_year: int, processor: DataProcessor):
+    def store_chunks(self, ticker: str, fiscal_year: int, processor: DataProcessor, filing_type: str = '10-K'):
         """Store processed chunks in database"""
         chunks = processor.get_chunks()
         embeddings = processor.get_embeddings()
@@ -253,7 +297,7 @@ class DatabaseIntegration:
             logger.warning(f"⚠️ No chunks or embeddings to store for {ticker} FY{fiscal_year}")
             return 0
 
-        logger.info(f"💾 Storing {len(chunks)} chunks for {ticker} FY{fiscal_year}")
+        logger.info(f"💾 Storing {len(chunks)} chunks for {ticker} {filing_type} FY{fiscal_year}")
 
         conn = None
         cursor = None
@@ -261,21 +305,23 @@ class DatabaseIntegration:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            # Delete existing chunks for this ticker and fiscal year
+            # Delete existing chunks for this ticker, fiscal year, and filing type
             cursor.execute("""
                 DELETE FROM ten_k_chunks
-                WHERE ticker = %s AND fiscal_year = %s
-            """, (ticker, fiscal_year))
+                WHERE ticker = %s AND fiscal_year = %s AND filing_type = %s
+            """, (ticker, fiscal_year, filing_type))
             deleted_count = cursor.rowcount
             if deleted_count > 0:
                 logger.info(f"  🗑️ Deleted {deleted_count} existing chunks")
 
             # Prepare chunk data
+            filing_type_abbr = filing_type.replace('-', '')
             chunk_data = []
             for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 metadata = {
                     'ticker': ticker,
                     'fiscal_year': fiscal_year,
+                    'filing_type': filing_type,
                     'chunk_index': idx,
                     'type': chunk.get('type'),
                     'level': chunk.get('level'),
@@ -284,7 +330,7 @@ class DatabaseIntegration:
                     'sec_section_title': chunk.get('sec_section_title')
                 }
 
-                citation = f"{ticker}_10K_FY{fiscal_year}_{idx}"
+                citation = f"{ticker}_{filing_type_abbr}_FY{fiscal_year}_{idx}"
 
                 chunk_data.append((
                     chunk['content'],
@@ -292,7 +338,7 @@ class DatabaseIntegration:
                     json.dumps(metadata),
                     ticker,
                     fiscal_year,
-                    '10-K',
+                    filing_type,
                     idx,
                     citation,
                     chunk.get('type', 'unknown'),
@@ -397,9 +443,127 @@ class DatabaseIntegration:
             if cursor:
                 cursor.close()
 
-    def check_data_exists(self, ticker: str, fiscal_year: int) -> bool:
+    def store_complete_filing(
+        self,
+        ticker: str,
+        fiscal_year: int,
+        filing_type: str,
+        document_text: str,
+        filing_period: Optional[str] = None,
+        filing_date: Optional[str] = None,
+        company_name: Optional[str] = None,
+        sections: Optional[List[str]] = None,
+        section_offsets: Optional[Dict[str, Dict[str, int]]] = None,
+        accession_number: Optional[str] = None,
+        cik: Optional[str] = None,
+        source_url: Optional[str] = None,
+        cache_path: Optional[str] = None
+    ) -> bool:
         """
-        Check if data already exists for this ticker-year combination
+        Store complete SEC filing document in database
+
+        Args:
+            ticker: Company ticker symbol
+            fiscal_year: Fiscal year of the filing
+            filing_type: Type of filing ('10-K', '10-Q', '8-K')
+            document_text: Full text of the SEC filing
+            filing_period: Normalized period (e.g., 'Q2' for 10-Q, date for 8-K)
+            filing_date: Actual filing date
+            company_name: Company name
+            sections: List of sections in the document
+            section_offsets: Character offsets for each section
+            accession_number: SEC accession number
+            cik: Central Index Key
+            source_url: SEC EDGAR URL
+            cache_path: Original cache directory path
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not document_text or len(document_text.strip()) < 100:
+            logger.warning(f"⚠️ Document text too short for {ticker} FY{fiscal_year} {filing_type}")
+            return False
+
+        logger.info(f"📄 Storing complete filing: {ticker} FY{fiscal_year} {filing_type}")
+
+        conn = None
+        cursor = None
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+
+            # Parse quarter from filing_period if it's a 10-Q
+            quarter = None
+            if filing_type == '10-Q' and filing_period:
+                if filing_period.startswith('Q'):
+                    try:
+                        quarter = int(filing_period[1])
+                    except (ValueError, IndexError):
+                        logger.warning(f"Could not parse quarter from filing_period: {filing_period}")
+
+            # Calculate document length
+            document_length = len(document_text)
+
+            # Prepare data
+            cursor.execute("""
+                INSERT INTO complete_sec_filings (
+                    ticker, company_name, filing_type, fiscal_year,
+                    quarter, filing_date, filing_period,
+                    document_text, document_length,
+                    sections, section_offsets,
+                    accession_number, cik, form_type,
+                    source_url, cache_path
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ticker, filing_type, fiscal_year, quarter, filing_date)
+                DO UPDATE SET
+                    company_name = EXCLUDED.company_name,
+                    filing_period = EXCLUDED.filing_period,
+                    document_text = EXCLUDED.document_text,
+                    document_length = EXCLUDED.document_length,
+                    sections = EXCLUDED.sections,
+                    section_offsets = EXCLUDED.section_offsets,
+                    accession_number = EXCLUDED.accession_number,
+                    cik = EXCLUDED.cik,
+                    form_type = EXCLUDED.form_type,
+                    source_url = EXCLUDED.source_url,
+                    cache_path = EXCLUDED.cache_path,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (
+                ticker,
+                company_name,
+                filing_type,
+                fiscal_year,
+                quarter,
+                filing_date,
+                filing_period,
+                document_text,
+                document_length,
+                json.dumps(sections) if sections else None,
+                json.dumps(section_offsets) if section_offsets else None,
+                accession_number,
+                cik,
+                filing_type,  # form_type same as filing_type
+                source_url,
+                cache_path
+            ))
+
+            conn.commit()
+            logger.info(f"  ✅ Stored complete filing ({document_length:,} chars)")
+            return True
+
+        except Exception as e:
+            logger.error(f"  ❌ Failed to store complete filing: {e}")
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+
+    def check_data_exists(self, ticker: str, fiscal_year: int, filing_type: str = '10-K') -> bool:
+        """
+        Check if data already exists for this ticker-year-filing_type combination
 
         Returns True if data exists, False otherwise
         """
@@ -409,11 +573,11 @@ class DatabaseIntegration:
             conn = self.get_connection()
             cursor = conn.cursor()
 
-            # Check if chunks exist for this ticker-year
+            # Check if chunks exist for this ticker-year-filing_type
             cursor.execute("""
                 SELECT COUNT(*) FROM ten_k_chunks
-                WHERE ticker = %s AND fiscal_year = %s
-            """, (ticker, fiscal_year))
+                WHERE ticker = %s AND fiscal_year = %s AND filing_type = %s
+            """, (ticker, fiscal_year, filing_type))
 
             count = cursor.fetchone()[0]
             return count > 0
@@ -424,100 +588,6 @@ class DatabaseIntegration:
         finally:
             if cursor:
                 cursor.close()
-
-    def fetch_and_store_finqual_statements(self, ticker: str, fiscal_year: int) -> int:
-        """
-        Fetch clean financial statements from Finqual and store in database
-
-        Returns number of statements stored
-        """
-        if not FINQUAL_AVAILABLE:
-            return 0
-
-        logger.info(f"📊 Fetching Finqual statements for {ticker} FY{fiscal_year}...")
-
-        statements_stored = 0
-        # Map Finqual API types to standard statement type names
-        statement_configs = [
-            ('income', 'Income Statement', 'income_statement'),
-            ('balance', 'Balance Sheet', 'balance_sheet'),
-            ('cash', 'Cash Flow Statement', 'cash_flow')
-        ]
-
-        conn = None
-        cursor = None
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-
-            for api_type, stmt_name, stmt_type in statement_configs:
-                try:
-                    # Fetch from Finqual
-                    if api_type == 'income':
-                        df = fq.Finqual(ticker).income_stmt(fiscal_year)
-                    elif api_type == 'balance':
-                        df = fq.Finqual(ticker).balance_sheet(fiscal_year)
-                    elif api_type == 'cash':
-                        df = fq.Finqual(ticker).cash_flow(fiscal_year)
-                    else:
-                        continue
-
-                    if df is None or df.empty:
-                        logger.debug(f"  ⚠️ No {stmt_name} data from Finqual")
-                        continue
-
-                    # Convert to string representation
-                    content = df.to_string()
-
-                    # Create table ID
-                    table_id = f"{ticker}_FY{fiscal_year}_FINQUAL_{api_type.upper()}"
-
-                    # Store in database with CRITICAL priority
-                    cursor.execute("""
-                        INSERT INTO ten_k_tables
-                        (table_id, ticker, fiscal_year, content, table_data, path_string,
-                         sec_section, sec_section_title, is_financial_statement, statement_type, priority)
-                        VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (table_id) DO UPDATE
-                        SET content = EXCLUDED.content,
-                            table_data = EXCLUDED.table_data
-                    """, (
-                        table_id,
-                        ticker,
-                        fiscal_year,
-                        content,
-                        json.dumps({'source': 'finqual', 'clean': True}),
-                        f"Finqual > {stmt_name}",
-                        'item_8',
-                        'Item 8 - Financial Statements',
-                        True,
-                        stmt_type,  # Use standard statement type names
-                        'CRITICAL'
-                    ))
-
-                    statements_stored += 1
-                    logger.info(f"  ✅ Stored {stmt_name} from Finqual")
-
-                except Exception as e:
-                    logger.debug(f"  ⚠️ Could not fetch {stmt_name} from Finqual: {e}")
-                    continue
-
-            conn.commit()
-
-            if statements_stored > 0:
-                logger.info(f"  ✅ Stored {statements_stored} Finqual statements for {ticker} FY{fiscal_year}")
-
-            return statements_stored
-
-        except Exception as e:
-            logger.error(f"  ❌ Failed to store Finqual statements: {e}")
-            if conn:
-                conn.rollback()
-            return 0
-        finally:
-            if cursor:
-                cursor.close()
-
 
 def cleanup_temp_files():
     """Clean up temporary files created by datamule"""
@@ -554,20 +624,19 @@ def timeout_handler(signum, frame):
     raise TimeoutError("Process timeout")
 
 
-def ingest_ticker_worker(ticker: str, lookback_years: int, db_url: str, timeout_minutes: int = 30, skip_finqual: bool = False):
+def ingest_ticker_worker(ticker: str, lookback_years: int, db_url: str, timeout_minutes: int = 30):
     """
     Worker function for parallel processing - must be picklable.
     Each worker creates its own database connection.
 
     IMPORTANT: This function includes aggressive garbage collection to prevent
-    memory accumulation, especially from finqual and datamule libraries.
+    memory accumulation from datamule libraries.
 
     Args:
         ticker: Stock ticker symbol
         lookback_years: Number of years to look back
         db_url: Database connection URL
         timeout_minutes: Maximum time allowed for processing (default: 30 minutes)
-        skip_finqual: Skip fetching Finqual statements (default: False)
     """
     # Set up timeout handler (Unix-based systems only)
     if hasattr(signal, 'SIGALRM'):
@@ -581,13 +650,12 @@ def ingest_ticker_worker(ticker: str, lookback_years: int, db_url: str, timeout_
         db_integration = DatabaseIntegration(db_url=db_url)
 
         # Call the main ingestion function
-        result = ingest_ticker(ticker, lookback_years, db_integration, skip_finqual=skip_finqual)
+        result = ingest_ticker(ticker, lookback_years, db_integration)
 
         # Clean up database connection
         db_integration.close_connection()
 
         # AGGRESSIVE CLEANUP to prevent memory leaks
-        # This is critical for finqual which can accumulate memory
         cleanup_temp_files()
 
         # Force garbage collection multiple times
@@ -629,7 +697,7 @@ def ingest_ticker_worker(ticker: str, lookback_years: int, db_url: str, timeout_
             pass
 
 
-def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseIntegration, skip_finqual: bool = False):
+def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseIntegration):
     """Ingest 10-K filings for a single ticker using sophisticated processing"""
     logger.info(f"📈 Processing {ticker}...")
 
@@ -650,14 +718,14 @@ def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseInte
 
     if not filings_by_year:
         logger.warning(f"⚠️ No 10-K filings found for {ticker}")
-        return {'ticker': ticker, 'filings_processed': 0, 'chunks_stored': 0, 'tables_stored': 0, 'finqual_stored': 0}
+        return {'ticker': ticker, 'filings_processed': 0, 'chunks_stored': 0, 'tables_stored': 0}
 
     # Filter to only recent fiscal years based on lookback period
     filtered_filings = {fy: data for fy, data in filings_by_year.items() if fy >= min_fiscal_year}
 
     if not filtered_filings:
         logger.warning(f"⚠️ No recent 10-K filings found for {ticker} (need FY >= {min_fiscal_year})")
-        return {'ticker': ticker, 'filings_processed': 0, 'chunks_stored': 0, 'tables_stored': 0, 'finqual_stored': 0}
+        return {'ticker': ticker, 'filings_processed': 0, 'chunks_stored': 0, 'tables_stored': 0}
 
     skipped_years = set(filings_by_year.keys()) - set(filtered_filings.keys())
     if skipped_years:
@@ -668,7 +736,6 @@ def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseInte
     # Process each fiscal year
     total_chunks = 0
     total_tables = 0
-    total_finqual = 0
     filings_processed = 0
     filings_skipped = 0
 
@@ -698,19 +765,30 @@ def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseInte
             chunks_stored = db_integration.store_chunks(ticker, fiscal_year, processor)
             tables_stored = db_integration.store_tables(ticker, fiscal_year, processor)
 
-            # Fetch and store Finqual statements (clean financial statements)
-            if skip_finqual:
-                logger.info(f"⏭️  Skipping Finqual fetch (--skip-finqual enabled)")
-                finqual_stored = 0
-            else:
-                finqual_stored = db_integration.fetch_and_store_finqual_statements(ticker, fiscal_year)
+            # Store complete filing document
+            document_text = filing_data.get('document_text', '')
+            sections_list = None
+            if 'hierarchical_chunks' in filing_data and filing_data['hierarchical_chunks']:
+                # Extract unique sections from hierarchical chunks
+                sections_set = set()
+                for chunk in filing_data['hierarchical_chunks']:
+                    if 'sec_section' in chunk:
+                        sections_set.add(chunk['sec_section'])
+                sections_list = sorted(list(sections_set))
+
+            filing_stored = db_integration.store_complete_filing(
+                ticker=ticker,
+                fiscal_year=fiscal_year,
+                filing_type='10-K',
+                document_text=document_text,
+                sections=sections_list
+            )
 
             total_chunks += chunks_stored
             total_tables += tables_stored
-            total_finqual += finqual_stored
             filings_processed += 1
 
-            logger.info(f"✅ FY{fiscal_year}: {chunks_stored} chunks, {tables_stored} tables, {finqual_stored} Finqual statements")
+            logger.info(f"✅ FY{fiscal_year}: {chunks_stored} chunks, {tables_stored} tables, filing stored: {filing_stored}")
 
             # Clean up processor to free memory
             processor = None
@@ -732,9 +810,9 @@ def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseInte
     elif filings_processed == 0 and filings_skipped > 0:
         result_msg = f"⏭️  {ticker}: All {filings_skipped} filings already processed (skipped)"
     elif filings_skipped > 0:
-        result_msg = f"✅ {ticker}: {filings_processed} new, {filings_skipped} skipped, {total_chunks} chunks, {total_tables} tables, {total_finqual} Finqual"
+        result_msg = f"✅ {ticker}: {filings_processed} new, {filings_skipped} skipped, {total_chunks} chunks, {total_tables} tables"
     else:
-        result_msg = f"✅ {ticker}: {filings_processed} filings, {total_chunks} chunks, {total_tables} tables, {total_finqual} Finqual"
+        result_msg = f"✅ {ticker}: {filings_processed} filings, {total_chunks} chunks, {total_tables} tables"
 
     logger.info(result_msg)
 
@@ -747,7 +825,228 @@ def ingest_ticker(ticker: str, lookback_years: int, db_integration: DatabaseInte
         'filings_skipped': filings_skipped,
         'chunks_stored': total_chunks,
         'tables_stored': total_tables,
-        'finqual_stored': total_finqual
+    }
+
+
+def ingest_filing_worker(ticker: str, filing_type: str, lookback_years: int, db_url: str,
+                         timeout_minutes: int = 30, max_filings: int = None):
+    """
+    Worker function for parallel processing of any filing type.
+
+    Args:
+        ticker: Stock ticker symbol
+        filing_type: SEC filing type ('10-K', '10-Q', '8-K', 'S-11')
+        lookback_years: Number of years to look back
+        db_url: Database connection URL
+        timeout_minutes: Maximum time allowed for processing
+        max_filings: Maximum number of filings per ticker (useful for 8-K)
+    """
+    if filing_type == '10-K':
+        return ingest_ticker_worker(ticker, lookback_years, db_url, timeout_minutes)
+
+    if hasattr(signal, 'SIGALRM'):
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout_minutes * 60)
+
+    db_integration = None
+    try:
+        db_integration = DatabaseIntegration(db_url=db_url)
+        result = ingest_filing(ticker, filing_type, lookback_years, db_integration,
+                               max_filings=max_filings)
+        db_integration.close_connection()
+        cleanup_temp_files()
+        gc.collect()
+        db_integration = None
+
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+
+        return result
+
+    except TimeoutError:
+        logger.error(f"⏱️ Worker timeout for {ticker} {filing_type} (exceeded {timeout_minutes} minutes)")
+        return {'ticker': ticker, 'filing_type': filing_type, 'error': f'Timeout after {timeout_minutes} minutes'}
+
+    except Exception as e:
+        logger.error(f"❌ Worker failed for {ticker} {filing_type}: {e}")
+        return {'ticker': ticker, 'filing_type': filing_type, 'error': str(e)}
+
+    finally:
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+        try:
+            if db_integration:
+                db_integration.close_connection()
+            cleanup_temp_files()
+            gc.collect()
+        except:
+            pass
+
+
+def ingest_filing(ticker: str, filing_type: str, lookback_years: int,
+                  db_integration: DatabaseIntegration, max_filings: int = None):
+    """
+    Ingest any filing type for a single ticker.
+
+    Args:
+        ticker: Stock ticker symbol
+        filing_type: SEC filing type ('10-K', '10-Q', '8-K', 'S-11')
+        lookback_years: Number of years to look back
+        db_integration: DatabaseIntegration instance
+        max_filings: Maximum number of filings per ticker (useful for 8-K)
+    """
+    # For 10-K, delegate to the original function
+    if filing_type == '10-K':
+        return ingest_ticker(ticker, lookback_years, db_integration)
+
+    logger.info(f"📈 Processing {ticker} ({filing_type})...")
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=lookback_years * 365)
+
+    start_year = start_date.year - 1
+    end_year = end_date.year + 1
+    min_fiscal_year = start_date.year
+
+    logger.info(f"📥 Downloading {filing_type} filings from {start_year} to {end_year}")
+
+    filings_by_key = download_and_extract_filing(
+        ticker, start_year, end_year,
+        filing_type=filing_type,
+        max_filings=max_filings
+    )
+
+    if not filings_by_key:
+        logger.warning(f"⚠️ No {filing_type} filings found for {ticker}")
+        return {'ticker': ticker, 'filing_type': filing_type, 'filings_processed': 0,
+                'chunks_stored': 0, 'tables_stored': 0}
+
+    # For 8-K, filing keys can be dates or year-based — filter by year
+    if filing_type == '8-K':
+        filtered_filings = {}
+        for key, data in filings_by_key.items():
+            key_str = str(key)
+            # Extract year from date string (YYYY-MM-DD) or integer key
+            try:
+                key_year = int(key_str[:4])
+            except (ValueError, IndexError):
+                key_year = min_fiscal_year  # include if we can't parse
+            if key_year >= min_fiscal_year:
+                filtered_filings[key] = data
+    else:
+        # 10-Q, S-11: filter by fiscal year
+        filtered_filings = {fy: data for fy, data in filings_by_key.items()
+                           if isinstance(fy, int) and fy >= min_fiscal_year}
+
+    if not filtered_filings:
+        logger.warning(f"⚠️ No recent {filing_type} filings found for {ticker}")
+        return {'ticker': ticker, 'filing_type': filing_type, 'filings_processed': 0,
+                'chunks_stored': 0, 'tables_stored': 0}
+
+    logger.info(f"📦 Found {len(filtered_filings)} {filing_type} filing(s) to process")
+
+    total_chunks = 0
+    total_tables = 0
+    filings_processed = 0
+    filings_skipped = 0
+
+    for filing_key, filing_data in filtered_filings.items():
+        logger.info(f"\n🔧 Processing {filing_type} key={filing_key}...")
+
+        # For DB storage, convert filing_key to an integer fiscal_year
+        # 8-K date keys get converted to year integer
+        if isinstance(filing_key, int):
+            fiscal_year_int = filing_key
+        else:
+            try:
+                fiscal_year_int = int(str(filing_key)[:4])
+            except (ValueError, IndexError):
+                fiscal_year_int = min_fiscal_year
+
+        # Check if data already exists
+        if db_integration.check_data_exists(ticker, fiscal_year_int, filing_type):
+            logger.info(f"⏭️  Skipping {ticker} {filing_type} key={filing_key} - already processed")
+            filings_skipped += 1
+            continue
+
+        try:
+            processor = DataProcessor()
+            processor.prepare_chunks(filing_data, use_hierarchical=True, exclude_titles=True)
+            processor.create_embeddings()
+
+            if filing_type not in ('8-K', 'S-11'):
+                processor.identify_financial_statement_tables()
+
+            chunks_stored = db_integration.store_chunks(ticker, fiscal_year_int, processor, filing_type=filing_type)
+            tables_stored = db_integration.store_tables(ticker, fiscal_year_int, processor)
+
+            # Store complete filing document
+            document_text = filing_data.get('document_text', '')
+            sections_list = None
+            if 'hierarchical_chunks' in filing_data and filing_data['hierarchical_chunks']:
+                sections_set = set()
+                for chunk in filing_data['hierarchical_chunks']:
+                    if 'sec_section' in chunk:
+                        sections_set.add(chunk['sec_section'])
+                sections_list = sorted(list(sections_set))
+
+            # Determine filing_period for 10-Q and 8-K
+            filing_period = None
+            if filing_type == '10-Q':
+                # Extract quarter from filing_data metadata if available
+                # Otherwise use the filing_key format if it contains quarter info
+                filing_period = filing_data.get('quarter', f"Q{filing_data.get('quarter_num', '')}")
+            elif filing_type == '8-K':
+                # For 8-K, use the filing date as the period
+                filing_period = str(filing_key) if not isinstance(filing_key, int) else None
+
+            filing_stored = db_integration.store_complete_filing(
+                ticker=ticker,
+                fiscal_year=fiscal_year_int,
+                filing_type=filing_type,
+                document_text=document_text,
+                filing_period=filing_period,
+                sections=sections_list
+            )
+
+            total_chunks += chunks_stored
+            total_tables += tables_stored
+            filings_processed += 1
+
+            logger.info(f"✅ {filing_type} key={filing_key}: {chunks_stored} chunks, {tables_stored} tables, filing stored: {filing_stored}")
+
+            processor = None
+            gc.collect()
+
+        except Exception as e:
+            logger.error(f"❌ Failed to process {filing_type} key={filing_key}: {e}")
+            try:
+                processor = None
+                gc.collect()
+            except:
+                pass
+            continue
+
+    # Build result message
+    if filings_processed == 0 and filings_skipped == 0:
+        result_msg = f"⚠️  {ticker} {filing_type}: No filings found"
+    elif filings_processed == 0 and filings_skipped > 0:
+        result_msg = f"⏭️  {ticker} {filing_type}: All {filings_skipped} filings already processed"
+    elif filings_skipped > 0:
+        result_msg = f"✅ {ticker} {filing_type}: {filings_processed} new, {filings_skipped} skipped, {total_chunks} chunks, {total_tables} tables"
+    else:
+        result_msg = f"✅ {ticker} {filing_type}: {filings_processed} filings, {total_chunks} chunks, {total_tables} tables"
+
+    logger.info(result_msg)
+    cleanup_temp_files()
+
+    return {
+        'ticker': ticker,
+        'filing_type': filing_type,
+        'filings_processed': filings_processed,
+        'filings_skipped': filings_skipped,
+        'chunks_stored': total_chunks,
+        'tables_stored': total_tables,
     }
 
 
@@ -886,7 +1185,7 @@ def main():
 
         completed = 0
         # Use max_tasks_per_child=1 to ensure each process handles only ONE ticker
-        # This prevents memory accumulation from finqual and other libraries
+        # This prevents memory accumulation from datamule and other libraries
         executor_kwargs = {'max_workers': args.workers}
         if supports_max_tasks:
             executor_kwargs['max_tasks_per_child'] = 1
@@ -976,13 +1275,10 @@ def main():
     total_skipped = sum(r.get('filings_skipped', 0) for r in results)
     total_chunks = sum(r.get('chunks_stored', 0) for r in results)
     total_tables = sum(r.get('tables_stored', 0) for r in results)
-    total_finqual = sum(r.get('finqual_stored', 0) for r in results)
-
     logger.info(f"Total filings processed: {total_filings}")
     logger.info(f"Total filings skipped: {total_skipped}")
     logger.info(f"Total chunks: {total_chunks}")
     logger.info(f"Total tables: {total_tables}")
-    logger.info(f"Total Finqual statements: {total_finqual}")
 
     # Count successes and failures
     successful = [r for r in results if 'error' not in r and r.get('filings_processed', 0) > 0]
@@ -1002,8 +1298,7 @@ def main():
         for result in successful[:10]:
             skipped_msg = f", {result.get('filings_skipped', 0)} skipped" if result.get('filings_skipped', 0) > 0 else ""
             logger.info(f"  {result['ticker']}: {result['filings_processed']} filings{skipped_msg}, "
-                       f"{result['chunks_stored']} chunks, {result['tables_stored']} tables, "
-                       f"{result.get('finqual_stored', 0)} Finqual")
+                       f"{result['chunks_stored']} chunks, {result['tables_stored']} tables")
         if len(successful) > 10:
             logger.info(f"  ... and {len(successful) - 10} more")
 

@@ -26,7 +26,6 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import psycopg2
 from psycopg2.extras import execute_values
-import io
 from dotenv import load_dotenv
 
 # Load environment variables from main project directory
@@ -93,6 +92,33 @@ class EmbeddingProcessor:
         logger.info(f"✅ Garbage collection completed: {collected} objects collected")
         self.log_memory_usage(f"{stage} (after GC)")
     
+    @staticmethod
+    def _extract_transcript_text(transcript: Dict[str, Any]) -> str:
+        """Extract text content from a transcript dict, handling nested data structures."""
+        text = ""
+
+        # Check for nested data structure first
+        if 'data' in transcript and isinstance(transcript['data'], dict):
+            if 'transcript' in transcript['data']:
+                text = transcript['data']['transcript']
+            elif 'content' in transcript['data']:
+                text = transcript['data']['content']
+
+        # Fallback to direct fields
+        if not text:
+            if 'content' in transcript:
+                text = transcript['content']
+            elif 'transcript' in transcript:
+                text = transcript['transcript']
+            else:
+                # Try to extract text from other fields
+                for key, value in transcript.items():
+                    if isinstance(value, str) and len(value) > 100:
+                        text = value
+                        break
+
+        return text
+
     def chunk_text(self, text: str, chunk_size: int = None, chunk_overlap: int = None) -> List[str]:
         """Split text into overlapping chunks."""
         if chunk_size is None:
@@ -158,29 +184,8 @@ class EmbeddingProcessor:
         skipped_count = 0
         
         for transcript in transcripts:
-            # Extract text content
-            text = ""
-            
-            # Check for nested data structure first
-            if 'data' in transcript and isinstance(transcript['data'], dict):
-                if 'transcript' in transcript['data']:
-                    text = transcript['data']['transcript']
-                elif 'content' in transcript['data']:
-                    text = transcript['data']['content']
-            
-            # Fallback to direct fields
-            if not text:
-                if 'content' in transcript:
-                    text = transcript['content']
-                elif 'transcript' in transcript:
-                    text = transcript['transcript']
-                else:
-                    # Try to extract text from other fields
-                    for key, value in transcript.items():
-                        if isinstance(value, str) and len(value) > 100:
-                            text = value
-                            break
-            
+            text = self._extract_transcript_text(transcript)
+
             # Skip if no meaningful text found
             if not text or len(text.strip()) < 50:
                 logger.debug(f"Skipping transcript with insufficient content: {transcript.get('ticker', 'unknown')} (length: {len(text) if text else 0})")
@@ -212,7 +217,6 @@ class EmbeddingProcessor:
                     'ticker': ticker,
                     'date': date,
                     'chunk_index': i,
-                    'chunk_text': chunk,
                     'citation': citation,
                     'company_name': transcript.get('company_name', 'Unknown'),
                     'quarter': quarter_info['quarter_num'],
@@ -330,29 +334,8 @@ class EmbeddingProcessor:
             skipped_complete_count = 0
             
             for transcript in transcripts:
-                # Extract text content
-                text = ""
-                
-                # Check for nested data structure first
-                if 'data' in transcript and isinstance(transcript['data'], dict):
-                    if 'transcript' in transcript['data']:
-                        text = transcript['data']['transcript']
-                    elif 'content' in transcript['data']:
-                        text = transcript['data']['content']
-                
-                # Fallback to direct fields
-                if not text:
-                    if 'content' in transcript:
-                        text = transcript['content']
-                    elif 'transcript' in transcript:
-                        text = transcript['transcript']
-                    else:
-                        # Try to extract text from other fields
-                        for key, value in transcript.items():
-                            if isinstance(value, str) and len(value) > 100:
-                                text = value
-                                break
-                
+                text = self._extract_transcript_text(transcript)
+
                 # Skip if no meaningful text found
                 if not text or len(text.strip()) < 50:
                     logger.debug(f"Skipping transcript with insufficient content for complete storage: {transcript.get('ticker', 'unknown')} (length: {len(text) if text else 0})")
@@ -686,112 +669,6 @@ class EmbeddingProcessor:
         logger.info("   📚 Complete transcripts available for full-text search and analysis!")
 
 
-def setup_database_table(pgvector_url: str):
-    """Create/format the database tables for RAG system at the start."""
-    try:
-        logger.info("🔧 Setting up database tables for RAG system...")
-        conn = psycopg2.connect(pgvector_url)
-        cursor = conn.cursor()
-        logger.info("✅ Connected to PostgreSQL database")
-        
-        # Drop existing tables if they exist (clean slate)
-        logger.info("🗑️ Dropping existing tables...")
-        cursor.execute("DROP TABLE IF EXISTS transcript_chunks CASCADE;")
-        cursor.execute("DROP TABLE IF EXISTS complete_transcripts CASCADE;")
-        conn.commit()
-        logger.info("✅ Existing tables dropped")
-        
-        # Create the transcript_chunks table with all required fields for RAG system
-        logger.info("🏗️ Creating transcript_chunks table...")
-        cursor.execute("""
-            CREATE TABLE transcript_chunks (
-                id SERIAL PRIMARY KEY,
-                chunk_text TEXT NOT NULL,
-                embedding VECTOR(384),
-                metadata JSONB,
-                ticker VARCHAR(10),
-                year INTEGER,
-                quarter INTEGER,
-                transcript_id VARCHAR(100),
-                chunk_index INTEGER,
-                citation VARCHAR(200),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        logger.info("✅ transcript_chunks table structure created")
-        
-        # Create the complete_transcripts table
-        logger.info("🏗️ Creating complete_transcripts table...")
-        cursor.execute("""
-            CREATE TABLE complete_transcripts (
-                id SERIAL PRIMARY KEY,
-                transcript_id VARCHAR(100) UNIQUE NOT NULL,
-                ticker VARCHAR(10) NOT NULL,
-                company_name VARCHAR(200),
-                date VARCHAR(50),
-                year INTEGER,
-                quarter INTEGER,
-                full_transcript TEXT NOT NULL,
-                metadata JSONB,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        logger.info("✅ complete_transcripts table structure created")
-        
-        # Create indexes for optimal RAG performance
-        logger.info("🔍 Creating vector similarity index...")
-        cursor.execute("""
-            CREATE INDEX transcript_chunks_embedding_idx 
-            ON transcript_chunks USING ivfflat (embedding vector_cosine_ops);
-        """)
-        logger.info("✅ Vector similarity index created")
-        
-        logger.info("🔍 Creating transcript_chunks indexes...")
-        cursor.execute("""
-            CREATE INDEX transcript_chunks_ticker_idx 
-            ON transcript_chunks (ticker);
-        """)
-        cursor.execute("""
-            CREATE INDEX transcript_chunks_year_quarter_idx 
-            ON transcript_chunks (year, quarter);
-        """)
-        cursor.execute("""
-            CREATE INDEX transcript_chunks_transcript_id_idx 
-            ON transcript_chunks (transcript_id);
-        """)
-        logger.info("✅ transcript_chunks indexes created")
-        
-        logger.info("🔍 Creating complete_transcripts indexes...")
-        cursor.execute("""
-            CREATE INDEX complete_transcripts_ticker_idx 
-            ON complete_transcripts (ticker);
-        """)
-        cursor.execute("""
-            CREATE INDEX complete_transcripts_year_quarter_idx 
-            ON complete_transcripts (year, quarter);
-        """)
-        cursor.execute("""
-            CREATE INDEX complete_transcripts_date_idx 
-            ON complete_transcripts (date);
-        """)
-        cursor.execute("""
-            CREATE INDEX complete_transcripts_company_name_idx 
-            ON complete_transcripts (company_name);
-        """)
-        logger.info("✅ complete_transcripts indexes created")
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        logger.info("🎉 Database tables setup completed successfully!")
-        logger.info("✅ RAG system tables ready with all required fields and indexes")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to setup database tables: {e}")
-        return False
-
 def main():
     """Main function."""
     # Check environment variables first
@@ -805,12 +682,7 @@ def main():
     
     logger.info("✅ Environment variables loaded successfully")
     logger.info(f"🔗 Database URL: {pgvector_url[:50]}...")
-    
-    # Setup database table FIRST before processing anything
-    if not setup_database_table(pgvector_url):
-        logger.error("❌ Database setup failed. Exiting.")
-        return
-    
+
     parser = argparse.ArgumentParser(description='Format database and create embeddings for earnings transcripts (2023-2025)')
     parser.add_argument('--max-files', type=int, default=1000000, help='Maximum files to process per quarter')
     parser.add_argument('--force-regenerate', action='store_true', help='Force regenerate embeddings')

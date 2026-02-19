@@ -130,6 +130,16 @@ export default function LandingPage() {
     return () => clearInterval(interval)
   }, [])
 
+  // Auto-resize landing textarea
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    const newHeight = Math.min(el.scrollHeight, 300)
+    el.style.height = `${newHeight}px`
+    el.style.overflowY = el.scrollHeight > 300 ? 'auto' : 'hidden'
+  }, [inputValue])
+
   const handleSubmit = (query: string) => {
     if (!query.trim()) return
     navigate(`/chat?q=${encodeURIComponent(query)}`)
@@ -276,7 +286,7 @@ export default function LandingPage() {
                   onChange={(e) => setInputValue(e.target.value)}
                   onKeyDown={handleKeyDown}
                   placeholder="Query SEC filings and earnings transcripts..."
-                  className="w-full px-5 py-4 pr-14 text-base text-[#0a1628] placeholder:text-slate-400 bg-transparent resize-none focus:outline-none min-h-[56px] max-h-[120px]"
+                  className="w-full px-5 py-4 pr-14 text-base text-[#0a1628] placeholder:text-slate-400 bg-transparent resize-none focus:outline-none min-h-[56px] overflow-hidden"
                   rows={1}
                 />
                 <button

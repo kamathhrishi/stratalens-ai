@@ -106,33 +106,36 @@ class SearchEngine:
             if ticker:
                 # Search with ticker filtering for both vector and keyword in parallel
                 rag_logger.info(f"🎯 Performing ticker-specific hybrid search for: {ticker}")
-                
+
+                # Convert "multiple" to None for database queries (multiple quarters should search without quarter filter)
+                search_quarter = None if target_quarter == "multiple" else target_quarter
+
                 # Run vector and keyword searches in parallel for better performance
                 parallel_retrieval = self.config.get("parallel_retrieval_enabled", True)
-                
+
                 if parallel_retrieval:
                     with ThreadPoolExecutor(max_workers=10) as executor:
                         # Submit both search tasks in parallel
                         vector_future = executor.submit(
-                            self.database_manager._search_postgres_with_ticker, 
-                            query_embedding, 
-                            ticker, 
-                            target_quarter
+                            self.database_manager._search_postgres_with_ticker,
+                            query_embedding,
+                            ticker,
+                            search_quarter
                         )
                         keyword_future = executor.submit(
-                            self._search_keywords_with_ticker, 
-                            query, 
-                            ticker, 
-                            target_quarter
+                            self._search_keywords_with_ticker,
+                            query,
+                            ticker,
+                            search_quarter
                         )
-                        
+
                         # Collect results as they complete
                         vector_results = vector_future.result()
                         keyword_results = keyword_future.result()
                 else:
                     # Sequential search (fallback for compatibility)
-                    vector_results = self.database_manager._search_postgres_with_ticker(query_embedding, ticker, target_quarter)
-                    keyword_results = self._search_keywords_with_ticker(query, ticker, target_quarter)
+                    vector_results = self.database_manager._search_postgres_with_ticker(query_embedding, ticker, search_quarter)
+                    keyword_results = self._search_keywords_with_ticker(query, ticker, search_quarter)
                 
                 rag_logger.info(f"📊 Vector search results: {len(vector_results)} chunks")
                 rag_logger.info(f"📊 Keyword search results: {len(keyword_results)} chunks")
@@ -143,33 +146,36 @@ class SearchEngine:
             else:
                 # General search without ticker filtering - run searches in parallel
                 rag_logger.info("🌐 Performing general hybrid search across all companies")
-                
+
+                # Convert "multiple" to None for database queries (multiple quarters should search without quarter filter)
+                search_quarter = None if target_quarter == "multiple" else target_quarter
+
                 # Run vector and keyword searches in parallel for better performance
                 parallel_retrieval = self.config.get("parallel_retrieval_enabled", True)
-                
+
                 if parallel_retrieval:
                     with ThreadPoolExecutor(max_workers=10) as executor:
                         # Submit both search tasks in parallel
                         vector_future = executor.submit(
-                            self.database_manager._search_postgres_general, 
-                            query_embedding, 
-                            max_results, 
-                            target_quarter
+                            self.database_manager._search_postgres_general,
+                            query_embedding,
+                            max_results,
+                            search_quarter
                         )
                         keyword_future = executor.submit(
-                            self._search_keywords, 
-                            query, 
-                            max_results, 
-                            target_quarter
+                            self._search_keywords,
+                            query,
+                            max_results,
+                            search_quarter
                         )
-                        
+
                         # Collect results as they complete
                         vector_results = vector_future.result()
                         keyword_results = keyword_future.result()
                 else:
                     # Sequential search (fallback for compatibility)
-                    vector_results = self.database_manager._search_postgres_general(query_embedding, max_results, target_quarter)
-                    keyword_results = self._search_keywords(query, max_results, target_quarter)
+                    vector_results = self.database_manager._search_postgres_general(query_embedding, max_results, search_quarter)
+                    keyword_results = self._search_keywords(query, max_results, search_quarter)
                 
                 rag_logger.info(f"📊 Vector search results: {len(vector_results)} chunks")
                 rag_logger.info(f"📊 Keyword search results: {len(keyword_results)} chunks")
@@ -464,3 +470,225 @@ class SearchEngine:
         rag_logger.info(f"📊 Per-quarter distribution: {chunks_per_quarter} chunks per quarter")
         
         return all_chunks
+
+    # ═════════════════════════════════════════════════════════════════════
+    # MULTI-QUERY & FOLLOW-UP SEARCH (used by RAG agent)
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def search_with_queries_async(
+        self,
+        queries: List[str],
+        target_quarters: List[str],
+        target_quarter: str,
+        ticker: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run multiple queries in parallel, merge and deduplicate by citation.
+        Used for initial search with rephrased questions (or single processed question).
+        """
+        chunks_per_quarter = self.config.get("chunks_per_quarter", 15)
+        loop = asyncio.get_event_loop()
+
+        async def search_one_async(question_text: str, question_idx: int) -> List[Dict[str, Any]]:
+            try:
+                if ticker:
+                    query_embedding = await loop.run_in_executor(
+                        None, self.embedding_model.encode, [question_text]
+                    )
+                    if len(target_quarters) > 1:
+                        chunks = []
+                        for quarter in target_quarters:
+                            q_chunks = await loop.run_in_executor(
+                                None,
+                                self.database_manager._search_postgres_with_ticker,
+                                query_embedding,
+                                ticker,
+                                quarter,
+                            )
+                            chunks.extend(q_chunks)
+                    else:
+                        chunks = await loop.run_in_executor(
+                            None,
+                            self.database_manager._search_postgres_with_ticker,
+                            query_embedding,
+                            ticker,
+                            target_quarter,
+                        )
+                else:
+                    if len(target_quarters) > 1:
+                        chunks = await self._search_multiple_quarters_async(
+                            question_text, target_quarters, chunks_per_quarter=chunks_per_quarter
+                        )
+                    else:
+                        chunks = await loop.run_in_executor(
+                            None,
+                            self.search_similar_chunks,
+                            question_text,
+                            chunks_per_quarter,
+                            target_quarter,
+                        )
+                for chunk in chunks:
+                    chunk["query_source"] = f"Query {question_idx + 1}"
+                    chunk["query_text"] = question_text
+                return chunks
+            except Exception as e:
+                rag_logger.error(f"Query {question_idx + 1} search failed: {e}")
+                return []
+
+        tasks = [search_one_async(q, i) for i, q in enumerate(queries)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                rag_logger.error(f"Query {i + 1} raised exception: {result}")
+            else:
+                all_results.extend(result)
+
+        # Deduplicate by citation (keep best score: lower distance = better)
+        seen = {}
+        for chunk in all_results:
+            citation = chunk.get("citation")
+            score_key = chunk.get("distance", 1.0)
+            if citation not in seen or seen[citation].get("distance", 1.0) > score_key:
+                seen[citation] = chunk
+        deduplicated = list(seen.values())
+        deduplicated.sort(key=lambda x: x.get("distance", 1.0))
+        num_quarters = len(target_quarters) if target_quarters else 1
+        return deduplicated[: chunks_per_quarter * num_quarters]
+
+    async def follow_up_search_async(
+        self,
+        question: str,
+        has_tickers: bool,
+        is_general_question: bool,
+        is_multi_ticker: bool,
+        tickers_to_process: List[str],
+        target_quarter: Optional[str],
+        target_quarters: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Single follow-up search: hybrid (vector + keyword) for ticker(s), else general."""
+        loop = asyncio.get_event_loop()
+        search_quarter = None if target_quarter == "multiple" else target_quarter
+        chunks_per_quarter = self.config.get("chunks_per_quarter", 15)
+
+        if has_tickers and not is_general_question:
+            if is_multi_ticker:
+                query_embedding = await loop.run_in_executor(
+                    None, self.embedding_model.encode, [question]
+                )
+
+                async def search_ticker(t: str):
+                    try:
+                        v = await loop.run_in_executor(
+                            None,
+                            self.database_manager._search_postgres_with_ticker,
+                            query_embedding,
+                            t,
+                            search_quarter,
+                        )
+                        k = await loop.run_in_executor(
+                            None,
+                            self._search_keywords_with_ticker,
+                            question,
+                            t,
+                            search_quarter,
+                        )
+                        return v, k
+                    except Exception as e:
+                        rag_logger.warning(f"Follow-up search for {t} failed: {e}")
+                        return [], []
+
+                ticker_results = await asyncio.gather(
+                    *[search_ticker(t) for t in tickers_to_process], return_exceptions=True
+                )
+                vector_chunks = []
+                keyword_chunks = []
+                for i, res in enumerate(ticker_results):
+                    if isinstance(res, Exception):
+                        continue
+                    v, k = res
+                    vector_chunks.extend(v)
+                    keyword_chunks.extend(k)
+                if vector_chunks or keyword_chunks:
+                    return combine_search_results(
+                        vector_chunks,
+                        keyword_chunks,
+                        self.config.get("vector_weight", 0.7),
+                        self.config.get("keyword_weight", 0.3),
+                        self.config.get("similarity_threshold", 0.3),
+                    )
+                return []
+            else:
+                t = tickers_to_process[0]
+                query_embedding = await loop.run_in_executor(
+                    None, self.embedding_model.encode, [question]
+                )
+                vector_task = loop.run_in_executor(
+                    None,
+                    self.database_manager._search_postgres_with_ticker,
+                    query_embedding,
+                    t,
+                    search_quarter,
+                )
+                keyword_task = loop.run_in_executor(
+                    None,
+                    self._search_keywords_with_ticker,
+                    question,
+                    t,
+                    search_quarter,
+                )
+                vector_chunks, keyword_chunks = await asyncio.gather(vector_task, keyword_task)
+                return combine_search_results(
+                    vector_chunks,
+                    keyword_chunks,
+                    self.config.get("vector_weight", 0.7),
+                    self.config.get("keyword_weight", 0.3),
+                    self.config.get("similarity_threshold", 0.3),
+                )
+        else:
+            if len(target_quarters) > 1:
+                return await self._search_multiple_quarters_async(
+                    question, target_quarters, chunks_per_quarter=chunks_per_quarter
+                )
+            return await loop.run_in_executor(
+                None,
+                self.search_similar_chunks,
+                question,
+                chunks_per_quarter,
+                search_quarter,
+            )
+
+    async def follow_up_search_parallel_async(
+        self,
+        follow_up_questions: List[str],
+        has_tickers: bool,
+        is_general_question: bool,
+        is_multi_ticker: bool,
+        tickers_to_process: List[str],
+        target_quarter: Optional[str],
+        target_quarters: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Run multiple follow-up questions in parallel, merge and deduplicate by citation."""
+        tasks = [
+            self.follow_up_search_async(
+                q, has_tickers, is_general_question, is_multi_ticker,
+                tickers_to_process, target_quarter, target_quarters,
+            )
+            for q in follow_up_questions
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_chunks = []
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                rag_logger.error(f"Follow-up question {i + 1} failed: {r}")
+            elif r:
+                all_chunks.extend(r)
+        if not all_chunks:
+            return []
+        seen = {}
+        for chunk in all_chunks:
+            citation = chunk.get("citation", "")
+            if not citation:
+                continue
+            if citation not in seen or seen[citation].get("distance", 1.0) > chunk.get("distance", 1.0):
+                seen[citation] = chunk
+        return list(seen.values())

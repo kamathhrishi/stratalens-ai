@@ -6,6 +6,8 @@ import ChatInput from '../components/ChatInput'
 import ChatMessage from '../components/ChatMessage'
 import Sidebar from '../components/Sidebar'
 import AboutModal from '../components/AboutModal'
+import DocumentPanel, { DOCUMENT_PANEL_WIDTH } from '../components/DocumentPanel'
+import type { DocumentPanelContent } from '../components/DocumentPanel'
 import { useChat } from '../hooks/useChat'
 
 export default function ChatPage() {
@@ -19,98 +21,55 @@ export default function ChatPage() {
     loadConversation,
     startNewConversation,
   } = useChat()
-  const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const hasExecutedInitialQuery = useRef(false)
+  const shouldScrollRef = useRef(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [aboutOpen, setAboutOpen] = useState(false)
-  const isUserScrolling = useRef(false)
-  const scrollRAF = useRef<number | null>(null)
-  const lastContentLength = useRef(0)
+  const [documentPanel, setDocumentPanel] = useState<{ open: boolean; content: DocumentPanelContent | null }>({
+    open: false,
+    content: null,
+  })
+
+  const handleOpenDocument = useCallback((content: DocumentPanelContent) => {
+    setDocumentPanel({ open: true, content })
+  }, [])
+
+  const handleCloseDocument = useCallback(() => {
+    setDocumentPanel(prev => ({ ...prev, open: false }))
+  }, [])
+  // Scroll after React renders the new message into the DOM
+  useEffect(() => {
+    if (!shouldScrollRef.current) return
+    shouldScrollRef.current = false
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })
+      })
+    })
+  }, [messages])
+
+  const handleSendMessage = useCallback((content: string) => {
+    shouldScrollRef.current = true
+    sendMessage(content)
+  }, [sendMessage])
 
   // Auto-execute query from URL parameter
   useEffect(() => {
     const query = searchParams.get('q')
     if (query && !hasExecutedInitialQuery.current && messages.length === 0) {
       hasExecutedInitialQuery.current = true
-      sendMessage(decodeURIComponent(query))
+      handleSendMessage(decodeURIComponent(query))
     }
-  }, [searchParams, sendMessage, messages.length])
-
-  // Smooth scroll using requestAnimationFrame to avoid fighting
-  const scrollToBottom = useCallback((smooth = false) => {
-    if (isUserScrolling.current) return
-
-    // Cancel any pending scroll
-    if (scrollRAF.current) {
-      cancelAnimationFrame(scrollRAF.current)
-    }
-
-    scrollRAF.current = requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({
-        behavior: smooth ? 'smooth' : 'instant',
-        block: 'end'
-      })
-    })
-  }, [])
-
-  // Track user scrolling - check if near bottom
-  useEffect(() => {
-    const container = messagesContainerRef.current
-    if (!container) return
-
-    let scrollTimeout: ReturnType<typeof setTimeout>
-    const handleScroll = () => {
-      // Check if user is near the bottom (within 150px)
-      const { scrollTop, scrollHeight, clientHeight } = container
-      const isNearBottom = scrollHeight - scrollTop - clientHeight < 150
-
-      // Only mark as user scrolling if they scrolled UP (away from bottom)
-      if (!isNearBottom) {
-        isUserScrolling.current = true
-        clearTimeout(scrollTimeout)
-        scrollTimeout = setTimeout(() => {
-          isUserScrolling.current = false
-        }, 2000)
-      } else {
-        isUserScrolling.current = false
-      }
-    }
-
-    container.addEventListener('scroll', handleScroll, { passive: true })
-    return () => {
-      container.removeEventListener('scroll', handleScroll)
-      clearTimeout(scrollTimeout)
-      if (scrollRAF.current) cancelAnimationFrame(scrollRAF.current)
-    }
-  }, [])
-
-  // Auto-scroll on content changes - debounced during streaming
-  useEffect(() => {
-    const lastMessage = messages[messages.length - 1]
-    if (!lastMessage) return
-
-    const isStreaming = lastMessage.isStreaming
-    const currentLength = lastMessage.content?.length || 0
-
-    // During streaming, only scroll when content actually grows (not on every render)
-    if (isStreaming) {
-      if (currentLength > lastContentLength.current) {
-        lastContentLength.current = currentLength
-        scrollToBottom(false) // instant scroll during streaming
-      }
-    } else {
-      // After streaming completes, do a final smooth scroll
-      lastContentLength.current = 0
-      setTimeout(() => scrollToBottom(true), 50)
-    }
-  }, [messages, scrollToBottom])
+  }, [searchParams, handleSendMessage, messages.length])
 
   const isEmpty = messages.length === 0
 
+  const activePanelWidth = documentPanel.open ? DOCUMENT_PANEL_WIDTH : 0
+
   return (
     <div className="min-h-screen bg-[#faf9f7]">
-      {/* Sidebar */}
+      {/* Left Sidebar */}
       <Sidebar
         isCollapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -120,11 +79,13 @@ export default function ChatPage() {
         onNewConversation={startNewConversation}
       />
 
-      {/* Main content area - shifts based on sidebar */}
+      {/* Main content area - shifts based on both sidebars */}
       <div
-        className={`min-h-screen flex flex-col transition-all duration-200 ${
-          sidebarCollapsed ? 'lg:pl-[72px]' : 'lg:pl-[240px]'
-        }`}
+        className="min-h-screen flex flex-col transition-all duration-300"
+        style={{
+          paddingLeft: sidebarCollapsed ? '60px' : '220px',
+          paddingRight: `${activePanelWidth}px`,
+        }}
       >
         {/* Header bar */}
         <header className="sticky top-0 z-20 bg-white border-b border-slate-200">
@@ -161,7 +122,7 @@ export default function ChatPage() {
 
         {/* Chat area */}
         <main ref={messagesContainerRef} className="flex-1 pb-32 overflow-y-auto">
-          <div className="max-w-4xl mx-auto px-4 lg:px-6">
+          <div className={`mx-auto px-4 lg:px-6 transition-all duration-300 ${documentPanel.open ? 'max-w-2xl' : 'max-w-4xl'}`}>
             {isEmpty ? (
               // Empty state - enterprise style
               <motion.div
@@ -203,7 +164,7 @@ export default function ChatPage() {
                   ].map((query, index) => (
                     <button
                       key={index}
-                      onClick={() => sendMessage(query)}
+                      onClick={() => handleSendMessage(query)}
                       className="p-4 text-left bg-white border border-slate-200 rounded-lg hover:border-slate-300 hover:bg-slate-50 transition-all text-sm text-slate-600"
                     >
                       {query}
@@ -215,21 +176,25 @@ export default function ChatPage() {
               // Messages
               <div className="py-6 space-y-6">
                 {messages.map((message) => (
-                  <ChatMessage key={message.id} message={message} />
+                  <ChatMessage key={message.id} message={message} onOpenDocument={handleOpenDocument} />
                 ))}
-                <div ref={messagesEndRef} />
+                <div />
               </div>
             )}
           </div>
         </main>
 
         {/* Fixed input at bottom */}
-        <div className="fixed bottom-0 right-0 left-0 lg:left-[var(--sidebar-width)] bg-gradient-to-t from-[#faf9f7] via-[#faf9f7] to-transparent pt-6 pb-4 transition-all duration-200"
-          style={{ '--sidebar-width': sidebarCollapsed ? '72px' : '240px' } as React.CSSProperties}
+        <div
+          className="fixed bottom-0 bg-gradient-to-t from-[#faf9f7] via-[#faf9f7] to-transparent pt-6 pb-4 transition-all duration-300"
+          style={{
+            left: sidebarCollapsed ? '60px' : '200px',
+            right: `${activePanelWidth}px`,
+          }}
         >
-          <div className="max-w-4xl mx-auto px-4 lg:px-6">
+          <div className={`mx-auto px-4 lg:px-6 transition-all duration-300 ${documentPanel.open ? 'max-w-2xl' : 'max-w-4xl'}`}>
             <ChatInput
-              onSubmit={sendMessage}
+              onSubmit={handleSendMessage}
               isLoading={isLoading}
               placeholder="Query SEC filings and earnings transcripts..."
               autoFocus={!searchParams.get('q')}
@@ -241,6 +206,13 @@ export default function ChatPage() {
           </div>
         </div>
       </div>
+
+      {/* Document Panel (right sidebar) */}
+      <DocumentPanel
+        isOpen={documentPanel.open}
+        onClose={handleCloseDocument}
+        content={documentPanel.content}
+      />
 
       {/* About Modal */}
       <AboutModal isOpen={aboutOpen} onClose={() => setAboutOpen(false)} />

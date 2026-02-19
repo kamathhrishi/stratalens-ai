@@ -9,7 +9,24 @@ database connections, model settings, processing limits, and quarter information
 import os
 import logging
 import psycopg2
+from enum import Enum
 from typing import List
+
+
+class AnswerMode(str, Enum):
+    """Determines response depth based on question complexity."""
+    DIRECT = "direct"          # Simple factual lookup
+    STANDARD = "standard"      # Moderate analysis
+    DETAILED = "detailed"      # Full research report
+    DEEP_SEARCH = "deep_search"  # Exhaustive search with 10 iterations
+
+
+ANSWER_MODE_CONFIG = {
+    AnswerMode.DIRECT:      {"max_iterations": 2, "max_tokens": 2000, "confidence_threshold": 0.7},
+    AnswerMode.STANDARD:    {"max_iterations": 3, "max_tokens": 6000, "confidence_threshold": 0.8},
+    AnswerMode.DETAILED:    {"max_iterations": 4, "max_tokens": 16000, "confidence_threshold": 0.9},
+    AnswerMode.DEEP_SEARCH: {"max_iterations": 10, "max_tokens": 20000, "confidence_threshold": 0.95},
+}
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -42,9 +59,9 @@ class Config:
             },
             
             # OpenAI settings (response generation)
-            "openai_model": "gpt-4.1-mini-2025-04-14",  # OpenAI for response generation
-            "openai_max_tokens": 16000,  # Increased for more detailed responses
-            "openai_temperature": 0.3,
+            "openai_model": "gpt-5-nano-2025-08-07",  # OpenAI for response generation
+            "openai_max_tokens": int(os.getenv("RAG_OPENAI_MAX_TOKENS", "8000")),  # max_completion_tokens; lower = faster
+            "openai_temperature": 1,
             
             # Groq settings (question analysis, evaluation, rephrasing)
             "groq_model": "openai/gpt-oss-20b",
@@ -55,7 +72,9 @@ class Config:
             "cerebras_model": "qwen-3-235b-a22b-instruct-2507",
             "cerebras_max_tokens": 16000,  # Increased for more detailed responses
             "cerebras_temperature": 0.1,
-            "use_cerebras": True,  # Enable Cerebras as primary LLM
+            "use_cerebras": True,  # Enable Cerebras as primary LLM (legacy; prefer llm_provider)
+            # LLM provider: "openai" | "cerebras" | "auto" (auto = Cerebras if key set, else OpenAI)
+            "llm_provider": os.getenv("RAG_LLM_PROVIDER", "cerebras"),
             
             # Embedding settings
             "embedding_model": "all-MiniLM-L6-v2",
@@ -280,8 +299,8 @@ class Config:
             "**IMPORTANT**: The latest available data may differ by company and data type.",
             "When users ask about 'latest' or 'most recent' data, use the most appropriate source for their question.",
             "Data includes:",
-            "- Earnings transcripts: Quarterly calls with management commentary, guidance, and analyst Q&A",
-            "- 10-K filings: Annual SEC filings with audited financials, risk factors, compensation data",
+            "- Earnings transcripts: Quarterly calls (quarters listed above; coverage may start around 2023).",
+            "- 10-K filings: Annual SEC filings with audited financials, risk factors, compensation data. **10-K filings are available from fiscal year 2019 onward** (e.g. FY2019, FY2020, FY2021, ...). When a user asks for a specific year's 10-K (e.g. '10-K from 2020'), that year is available if ingested.",
             "- News: Recent developments, announcements, and market updates"
         ])
         

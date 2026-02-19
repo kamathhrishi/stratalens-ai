@@ -60,30 +60,27 @@ export function useChat(): UseChatReturn {
     if (!isSignedIn) return
     setIsLoading(true)
     setError(null)
+    setMessages([])  // Clear immediately for clean transition
     try {
       const token = await getToken()
       if (token) {
         const conversation = await fetchConversation(conversationId, token)
-        console.log('Loaded conversation:', conversationId, conversation)
-        console.log('Messages in conversation:', conversation.messages)
         setCurrentConversationId(conversationId)
         // Convert backend messages to frontend format
         const messages = conversation.messages || []
-        console.log('Messages array:', messages, 'length:', messages.length)
         const loadedMessages: ChatMessage[] = messages.map((msg) => {
-          console.log('Mapping message:', msg.role, msg.content?.substring(0, 50))
           return {
             id: msg.id,
             role: msg.role as 'user' | 'assistant',
             content: msg.content || '',
             sources: msg.citations || [],
+            reasoning: msg.reasoning || [],
             timestamp: new Date(msg.created_at),
             isStreaming: false,
           }
         })
-        console.log('Loaded messages:', loadedMessages.length, loadedMessages)
         setMessages(loadedMessages)
-        setCurrentReasoning([]) // Clear reasoning when loading saved conversation
+        setCurrentReasoning([]) // Clear global reasoning when loading saved conversation
       }
     } catch (err) {
       console.error('Failed to load conversation:', err)
@@ -150,9 +147,6 @@ export function useChat(): UseChatReturn {
           newConversationId = event.conversation_id
           setCurrentConversationId(newConversationId)
         }
-
-        // Debug log
-        console.log('SSE Event:', event.type, event)
 
         handleSSEEvent(
           event,
@@ -235,6 +229,7 @@ export function useChat(): UseChatReturn {
         case 'analysis':
         case 'search':
         case 'news_search':
+        case '10k_search':
         case 'iteration_start':
         case 'iteration_search':
         case 'iteration_transcript_search':
@@ -259,7 +254,6 @@ export function useChat(): UseChatReturn {
               data: event.data,
             }
             currentReasoningSteps.push(newStep)
-            setCurrentReasoning([...currentReasoningSteps])
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === messageId
@@ -280,8 +274,6 @@ export function useChat(): UseChatReturn {
           const answerContent = event.answer ||
             data?.answer as string ||
             response?.answer as string
-
-          console.log('Result event - answer found:', !!answerContent, answerContent?.substring(0, 100))
 
           if (answerContent) {
             setContent(answerContent)
@@ -363,7 +355,6 @@ export function useChat(): UseChatReturn {
               data: event.data,
             }
             currentReasoningSteps.push(newStep)
-            setCurrentReasoning([...currentReasoningSteps])
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === messageId

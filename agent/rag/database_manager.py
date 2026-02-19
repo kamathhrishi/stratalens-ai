@@ -155,11 +155,18 @@ class DatabaseManager:
                 logger.info(f"📅 Last {n} quarters for {ticker}: {quarters}")
                 return quarters
             else:
-                logger.warning(f"⚠️ No quarters found for company {ticker}")
+                # ✅ IMPROVED: Better logging for debugging
+                logger.warning(f"⚠️ No quarters found for company {ticker} in database")
+                logger.warning(f"⚠️ This could mean: (1) ticker not in DB, (2) no transcript data, or (3) data ingestion issue")
+                logger.warning(f"⚠️ Check if {ticker} data exists: SELECT COUNT(*) FROM transcript_chunks WHERE ticker='{ticker.upper()}'")
                 return []
-                
+
         except Exception as e:
-            logger.error(f"❌ Error finding last {n} quarters for {ticker}: {e}")
+            # ✅ IMPROVED: More detailed error logging
+            logger.error(f"❌ Database error finding last {n} quarters for {ticker}: {e}")
+            logger.error(f"❌ Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"❌ Stack trace: {traceback.format_exc()}")
             return []
     
     def get_general_latest_quarter(self) -> Optional[str]:
@@ -528,31 +535,42 @@ class DatabaseManager:
             rag_logger.info(f"✅ Connected to PostgreSQL database ({conn_time:.3f}s)")
 
             # Build query with optional quarter filtering
+            # Handle "multiple" as None (defensive check - should be handled upstream)
+            if target_quarter == "multiple":
+                rag_logger.warning(f"⚠️ Received target_quarter='multiple' - treating as None (search all quarters)")
+                target_quarter = None
+
             if target_quarter:
                 # Extract year and quarter from target_quarter (e.g., "2025_q1" -> year=2025, quarter=1)
-                year, quarter = target_quarter.split('_')
-                quarter_num = quarter[1:]  # Remove 'q' prefix
+                if '_' not in target_quarter:
+                    rag_logger.error(f"❌ Invalid target_quarter format: {target_quarter} (expected format: YYYY_qN)")
+                    # Fallback to searching without quarter filter
+                    target_quarter = None
+                else:
+                    year, quarter = target_quarter.split('_')
+                    quarter_num = quarter[1:]  # Remove 'q' prefix
 
-                query = """
-                SELECT chunk_text, metadata, year, quarter, ticker, 1 - (embedding <=> %s::vector) as similarity, chunk_index
-                FROM transcript_chunks
-                WHERE UPPER(ticker) = %s AND year = %s AND quarter = %s
-                ORDER BY embedding <=> %s::vector
-                LIMIT %s
-                """
-                
-                rag_logger.info(f"📝 Executing PostgreSQL query for ticker: {ticker}, year: {year}, quarter: {quarter_num}")
-                
-                # Run EXPLAIN ANALYZE in debug mode
-                params = (query_embedding.flatten().tolist(), ticker, int(year), int(quarter_num), query_embedding.flatten().tolist(), self.config.get("chunks_per_quarter"))
-                self._explain_analyze_query(query, params)
-                
-                # Time query execution
-                query_start = time.time()
-                cursor.execute(query, params)
-                query_time = time.time() - query_start
-                rag_logger.info(f"⏱️  Query executed in {query_time:.3f}s")
-            else:
+                    query = """
+                    SELECT chunk_text, metadata, year, quarter, ticker, 1 - (embedding <=> %s::vector) as similarity, chunk_index
+                    FROM transcript_chunks
+                    WHERE UPPER(ticker) = %s AND year = %s AND quarter = %s
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """
+
+                    rag_logger.info(f"📝 Executing PostgreSQL query for ticker: {ticker}, year: {year}, quarter: {quarter_num}")
+
+                    # Run EXPLAIN ANALYZE in debug mode
+                    params = (query_embedding.flatten().tolist(), ticker, int(year), int(quarter_num), query_embedding.flatten().tolist(), self.config.get("chunks_per_quarter"))
+                    self._explain_analyze_query(query, params)
+
+                    # Time query execution
+                    query_start = time.time()
+                    cursor.execute(query, params)
+                    query_time = time.time() - query_start
+                    rag_logger.info(f"⏱️  Query executed in {query_time:.3f}s")
+
+            if not target_quarter or target_quarter == "multiple":
                 # Search without quarter filtering
                 query = """
                 SELECT chunk_text, metadata, year, quarter, ticker, 1 - (embedding <=> %s::vector) as similarity, chunk_index
@@ -569,8 +587,12 @@ class DatabaseManager:
                 # Run EXPLAIN ANALYZE in debug mode
                 params = (query_embedding.flatten().tolist(), ticker, query_embedding.flatten().tolist(), self.config.get("chunks_per_quarter"))
                 self._explain_analyze_query(query, params)
-                
+
+                # ✅ FIX: Time query execution (was missing!)
+                query_start = time.time()
                 cursor.execute(query, params)
+                query_time = time.time() - query_start
+                rag_logger.info(f"⏱️  Query executed in {query_time:.3f}s")
             
             # Time fetch operation
             fetch_start = time.time()
@@ -838,6 +860,7 @@ class DatabaseManager:
                     query = """
                     SELECT chunk_text, metadata, ticker, fiscal_year, chunk_type,
                            sec_section, sec_section_title, path_string, chunk_index,
+                           char_offset,
                            1 - (embedding <=> $1::vector) as similarity
                     FROM ten_k_chunks
                     WHERE UPPER(ticker) = $2 AND fiscal_year = $3
@@ -855,6 +878,7 @@ class DatabaseManager:
                     query = """
                     SELECT chunk_text, metadata, ticker, fiscal_year, chunk_type,
                            sec_section, sec_section_title, path_string, chunk_index,
+                           char_offset,
                            1 - (embedding <=> $1::vector) as similarity
                     FROM ten_k_chunks
                     WHERE UPPER(ticker) = $2
@@ -894,6 +918,7 @@ class DatabaseManager:
                             'sec_section': row['sec_section'],
                             'sec_section_title': row['sec_section_title'],
                             'path_string': row['path_string'],
+                            'char_offset': row['char_offset'],
                             'source_type': '10-K'  # Mark as 10-K source
                         }
                         chunks.append(chunk)
@@ -904,6 +929,191 @@ class DatabaseManager:
         except Exception as e:
             rag_logger.error(f"❌ Async 10-K search failed: {e}")
             return []
+
+    # ═════════════════════════════════════════════════════════════════════
+    # STAGE 7b: BULK CROSS-COMPANY SEARCH OPERATIONS
+    # ═════════════════════════════════════════════════════════════════════
+
+    async def bulk_search_transcripts_async(
+        self,
+        query_embedding: np.ndarray,
+        tickers: List[str],
+        year: int,
+        quarter: int,
+        chunks_per_company: int = 5,
+        similarity_threshold: float = 0.3,
+    ) -> Dict[str, List[Dict]]:
+        """Search transcript chunks across many companies in a single query.
+
+        Uses ROW_NUMBER() OVER (PARTITION BY ticker) to get top-K chunks per company.
+        Returns Dict[ticker -> List[chunk_dicts]] grouped by company.
+        """
+        try:
+            if not self.pgvector_pool:
+                await self._initialize_async_pools()
+
+            embedding_list = query_embedding.flatten().tolist()
+            embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
+
+            async with self.pgvector_pool.acquire() as conn:
+                if tickers:
+                    upper_tickers = [t.upper() for t in tickers]
+                    query = """
+                    WITH ranked AS (
+                        SELECT chunk_text, ticker, year, quarter, chunk_index, metadata,
+                               1 - (embedding <=> $1::vector) as similarity,
+                               ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY embedding <=> $1::vector) as rn
+                        FROM transcript_chunks
+                        WHERE year = $2 AND quarter = $3
+                          AND UPPER(ticker) = ANY($4::text[])
+                    )
+                    SELECT * FROM ranked WHERE rn <= $5 AND similarity >= $6
+                    ORDER BY similarity DESC
+                    """
+                    rows = await conn.fetch(
+                        query, embedding_str, year, quarter,
+                        upper_tickers, chunks_per_company, similarity_threshold,
+                    )
+                else:
+                    query = """
+                    WITH ranked AS (
+                        SELECT chunk_text, ticker, year, quarter, chunk_index, metadata,
+                               1 - (embedding <=> $1::vector) as similarity,
+                               ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY embedding <=> $1::vector) as rn
+                        FROM transcript_chunks
+                        WHERE year = $2 AND quarter = $3
+                    )
+                    SELECT * FROM ranked WHERE rn <= $4 AND similarity >= $5
+                    ORDER BY similarity DESC
+                    """
+                    rows = await conn.fetch(
+                        query, embedding_str, year, quarter,
+                        chunks_per_company, similarity_threshold,
+                    )
+
+                rag_logger.info(f"✅ Bulk transcript search returned {len(rows)} total chunks")
+
+                # Group by ticker
+                results: Dict[str, List[Dict]] = {}
+                for row in rows:
+                    ticker = row['ticker']
+                    metadata = row['metadata']
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+                    elif metadata is None:
+                        metadata = {}
+
+                    chunk = {
+                        'chunk_text': row['chunk_text'],
+                        'similarity': float(row['similarity']),
+                        'metadata': metadata,
+                        'year': row['year'],
+                        'quarter': row['quarter'],
+                        'ticker': ticker,
+                        'chunk_index': row['chunk_index'],
+                    }
+                    results.setdefault(ticker, []).append(chunk)
+
+                rag_logger.info(f"🎯 Bulk transcript search: {len(results)} companies with matches")
+                return results
+
+        except Exception as e:
+            rag_logger.error(f"❌ Bulk transcript search failed: {e}")
+            return {}
+
+    async def bulk_search_10k_async(
+        self,
+        query_embedding: np.ndarray,
+        tickers: List[str],
+        fiscal_year: int,
+        chunks_per_company: int = 5,
+        similarity_threshold: float = 0.3,
+    ) -> Dict[str, List[Dict]]:
+        """Search 10-K filing chunks across many companies in a single query.
+
+        Uses ROW_NUMBER() OVER (PARTITION BY ticker) to get top-K chunks per company.
+        Returns Dict[ticker -> List[chunk_dicts]] grouped by company.
+        """
+        try:
+            if not self.pgvector_pool:
+                await self._initialize_async_pools()
+
+            embedding_list = query_embedding.flatten().tolist()
+            embedding_str = '[' + ','.join(str(x) for x in embedding_list) + ']'
+
+            async with self.pgvector_pool.acquire() as conn:
+                if tickers:
+                    upper_tickers = [t.upper() for t in tickers]
+                    query = """
+                    WITH ranked AS (
+                        SELECT chunk_text, ticker, fiscal_year, chunk_index, metadata,
+                               sec_section, sec_section_title, path_string, chunk_type,
+                               char_offset,
+                               1 - (embedding <=> $1::vector) as similarity,
+                               ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY embedding <=> $1::vector) as rn
+                        FROM ten_k_chunks
+                        WHERE fiscal_year = $2
+                          AND UPPER(ticker) = ANY($3::text[])
+                    )
+                    SELECT * FROM ranked WHERE rn <= $4 AND similarity >= $5
+                    ORDER BY similarity DESC
+                    """
+                    rows = await conn.fetch(
+                        query, embedding_str, fiscal_year,
+                        upper_tickers, chunks_per_company, similarity_threshold,
+                    )
+                else:
+                    query = """
+                    WITH ranked AS (
+                        SELECT chunk_text, ticker, fiscal_year, chunk_index, metadata,
+                               sec_section, sec_section_title, path_string, chunk_type,
+                               char_offset,
+                               1 - (embedding <=> $1::vector) as similarity,
+                               ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY embedding <=> $1::vector) as rn
+                        FROM ten_k_chunks
+                        WHERE fiscal_year = $2
+                    )
+                    SELECT * FROM ranked WHERE rn <= $3 AND similarity >= $4
+                    ORDER BY similarity DESC
+                    """
+                    rows = await conn.fetch(
+                        query, embedding_str, fiscal_year,
+                        chunks_per_company, similarity_threshold,
+                    )
+
+                rag_logger.info(f"✅ Bulk 10-K search returned {len(rows)} total chunks")
+
+                # Group by ticker
+                results: Dict[str, List[Dict]] = {}
+                for row in rows:
+                    ticker = row['ticker']
+                    metadata = row['metadata']
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+                    elif metadata is None:
+                        metadata = {}
+
+                    chunk = {
+                        'chunk_text': row['chunk_text'],
+                        'similarity': float(row['similarity']),
+                        'metadata': metadata,
+                        'ticker': ticker,
+                        'fiscal_year': row['fiscal_year'],
+                        'chunk_index': row['chunk_index'],
+                        'sec_section': row['sec_section'],
+                        'sec_section_title': row['sec_section_title'],
+                        'path_string': row['path_string'],
+                        'chunk_type': row['chunk_type'],
+                        'char_offset': row['char_offset'],
+                    }
+                    results.setdefault(ticker, []).append(chunk)
+
+                rag_logger.info(f"🎯 Bulk 10-K search: {len(results)} companies with matches")
+                return results
+
+        except Exception as e:
+            rag_logger.error(f"❌ Bulk 10-K search failed: {e}")
+            return {}
 
     def search_10k_filings(self, query_embedding: np.ndarray, ticker: str, fiscal_year: int = None,
                            selected_sections: List[str] = None) -> List[Dict[str, Any]]:
@@ -921,6 +1131,7 @@ class DatabaseManager:
             base_select = """
                 SELECT chunk_text, metadata, ticker, fiscal_year, chunk_type,
                        sec_section, sec_section_title, path_string, chunk_index,
+                       char_offset,
                        1 - (embedding <=> %s::vector) as similarity
                 FROM ten_k_chunks
             """
@@ -988,6 +1199,7 @@ class DatabaseManager:
                         'sec_section': row['sec_section'],
                         'sec_section_title': row['sec_section_title'],
                         'path_string': row['path_string'],
+                        'char_offset': row['char_offset'],
                         'source_type': '10-K'  # Mark as 10-K source
                     }
                     chunks.append(chunk)

@@ -9,6 +9,7 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
 - [Semantic Data Source Routing](#semantic-data-source-routing)
 - [Question Planning & Reasoning](#question-planning--reasoning)
 - [Self-Reflection Loop](#self-reflection-loop)
+- [Follow-Up Search Strategy](#follow-up-search-strategy)
 - [Data Sources](#data-sources)
   - [Earnings Transcripts](#earnings-transcript-search)
   - [SEC 10-K Filings](#sec-10-k-filings-agent)
@@ -79,7 +80,9 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
 1. **Semantic Routing** - Routes to data sources based on question **intent**, not keywords
 2. **Research Planning** - Agent explains reasoning before searching ("I need to find...")
 3. **Multi-Source RAG** - Combines earnings transcripts, SEC filings, and news
-4. **Self-Reflection** - Evaluates answer quality and iterates until confident (≥90%)
+4. **Self-Reflection** - Evaluates answer quality and iterates until confident
+5. **Answer Modes** - Configurable iteration depth (2-10 iterations) and quality thresholds (70-95%)
+6. **Search-Optimized Follow-ups** - Generates keyword phrases, not verbose questions, for better RAG retrieval
 
 ---
 
@@ -95,19 +98,30 @@ The agent executes a **6-stage pipeline** for each question:
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ STAGE 2: QUESTION ANALYSIS (Cerebras LLM)                                │
+│ STAGE 2: QUESTION ANALYSIS & PLANNING (Cerebras LLM)                     │
+│ Single LLM call that performs:                                           │
 │ • Extract company tickers ($AAPL, $MSFT)                                 │
 │ • Detect time periods (Q4 2024, last 3 quarters, latest)                 │
 │ • Semantic routing → Choose data source based on INTENT                  │
+│ • Detect answer_mode (direct/standard/detailed/deep_search)              │
 │ • Generate semantically-grounded search query                            │
 │ • Validate question (reject off-topic/invalid)                           │
+│                                                                           │
+│ Quarter Resolution (company-specific database queries):                  │
+│ • "latest" → get_last_n_quarters_for_company(ticker, 1)                  │
+│ • "last 3 quarters" → get_last_n_quarters_for_company(ticker, 3)         │
+│ • Uses DB query: SELECT DISTINCT year, quarter FROM transcript_chunks    │
+│   WHERE ticker = %s ORDER BY year DESC, quarter DESC                     │
+│ • Each company gets its own most recent quarters (not global)            │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ STAGE 2.1: QUESTION PLANNING/REASONING (NEW)                             │
-│ • Agent generates research approach reasoning                            │
+│ STAGE 2.1: RESEARCH REASONING (Cerebras LLM)                             │
+│ • Separate LLM call generates transparent research reasoning             │
 │ • Example: "The user is asking about Azure revenue, so I need to find    │
 │   quarterly growth rates, management commentary on cloud competition..." │
+│ • Explains what metrics/data points to search for                        │
+│ • Used later for evaluation (did we find what we planned to find?)       │
 │ • Streamed to frontend as 'reasoning' event                              │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
@@ -118,13 +132,15 @@ The agent executes a **6-stage pipeline** for each question:
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ STAGE 2.6: 10-K SEC SEARCH (if data_source="10k" or needs_10k=true)      │
+│ STAGE 2.6: SEC 10-K RETRIEVAL AGENT (if data_source="10k")               │
+│ Invokes specialized retrieval agent for SEC 10-K annual filings:         │
+│ • Planning-driven sub-question generation                                │
 │ • LLM-based section routing (Item 1, Item 7, Item 8, etc.)               │
-│ • Hybrid search (TF-IDF + semantic)                                      │
-│ • Cross-encoder reranking                                                │
-│ • LLM-based table selection                                              │
+│ • Hybrid search (TF-IDF + semantic) with cross-encoder reranking         │
+│ • LLM-based table selection from financial statements                    │
+│ • Iterative retrieval (up to 5 iterations, self-evaluates)               │
 │ • Format with [10K1], [10K2] citation markers                            │
-│ • Uses more iterations (5 vs 4) for thorough analysis                    │
+│ Note: 10-K only for now (10-Q and 8-K support coming)                    │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -141,15 +157,22 @@ The agent executes a **6-stage pipeline** for each question:
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ STAGE 5: ITERATIVE IMPROVEMENT (3-5 iterations)                          │
+│ STAGE 5: ITERATIVE IMPROVEMENT (varies by answer mode)                   │
 │ For each iteration:                                                      │
 │   1. Evaluate answer quality (confidence, completeness, specificity)     │
 │   2. Check if reasoning goals are met                                    │
-│   3. Generate follow-up questions for gaps                               │
-│   4. Search in parallel with follow-up questions                         │
+│   3. Generate search-optimized keyword phrases (not verbose questions)   │
+│   4. Search ALL target quarters in parallel with each keyword phrase     │
 │   5. Agent may request news/transcript search                            │
 │   6. Regenerate answer with expanded context                             │
-│ Stop when: confidence ≥90%, max iterations, or agent decides sufficient  │
+│ Stop when: confidence ≥ threshold, max iterations, or agent satisfied    │
+│                                                                           │
+│ Answer Modes:                                                            │
+│ • direct: 2 iterations, 70% threshold - quick factual answers            │
+│ • standard: 3 iterations, 80% threshold - balanced analysis              │
+│ • detailed: 4 iterations, 90% threshold - comprehensive research         │
+│ • deep_search: 10 iterations, 95% threshold - exhaustive search          │
+│   (only triggers on explicit request: "search thoroughly", "dig deep")   │
 └─────────────────────────────────────────────────────────────────────────┘
                                     ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -166,6 +189,13 @@ The agent executes a **6-stage pipeline** for each question:
 
 The agent routes questions based on **intent**, not just keywords. This is a key differentiator from simple keyword matching.
 
+The main agent orchestrates access to **three specialized data source tools**:
+1. **Earnings Transcript Search** (`search_engine.py`) - Hybrid vector + keyword search over earnings calls
+2. **SEC 10-K Filings Agent** (`sec_filings_service_smart_parallel.py`) - Specialized retrieval agent for SEC 10-K annual filings
+3. **Tavily News Search** (`tavily_service.py`) - Real-time web search for breaking news
+
+The Question Analyzer automatically selects which tool(s) to use based on question intent. The SEC agent is a full retrieval agent (not just search) with its own iterative improvement loop optimized for structured SEC filings.
+
 ### How It Works
 
 The Question Analyzer uses Cerebras LLM to understand what type of information would **best answer** the question:
@@ -174,7 +204,9 @@ The Question Analyzer uses Cerebras LLM to understand what type of information w
 QUESTION INTENT → DATA SOURCE DECISION
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ 10-K SEC FILINGS (data_source="10k")                                     │
+│ SEC 10-K FILINGS (data_source="10k")  [Specialized Retrieval Agent]     │
+│ Currently: 10-K only (annual reports) | Coming: 10-Q, 8-K                │
+│                                                                           │
 │ Best for:                                                                │
 │ • Annual/full-year financial data, audited figures                       │
 │ • Balance sheets, income statements, cash flow statements                │
@@ -322,15 +354,74 @@ The agent performs iterative self-improvement until the answer meets quality thr
 - `overall_confidence` (0-1): Weighted combination
 
 **During iteration, the agent can:**
-- Generate follow-up questions (searched in parallel)
+- Generate search-optimized keyword phrases (NOT verbose questions)
+  - Example: "capex guidance 2025 AI allocation" instead of "What guidance..."
+  - Optimized for semantic/vector search in RAG context
+  - Each phrase searches ALL target quarters in parallel
 - Request additional transcript search (`needs_transcript_search`)
 - Request news search (`needs_news_search`)
 
 **Stops when:**
-1. Confidence ≥ 90%
-2. Max iterations reached (3 for general, 5 for 10-K)
+1. Confidence ≥ threshold (varies by answer mode: 70-95%)
+2. Max iterations reached (2-10 depending on answer mode)
 3. Agent decides answer is sufficient
-4. No follow-up questions generated
+4. No follow-up keyword phrases generated
+
+**Answer Mode Configuration:**
+| Mode | Iterations | Confidence | When Used |
+|------|------------|------------|-----------|
+| `direct` | 2 | 70% | Quick factual lookups |
+| `standard` | 3 | 80% | Default balanced analysis |
+| `detailed` | 4 | 90% | Comprehensive research |
+| `deep_search` | 10 | 95% | Explicit user request only |
+
+---
+
+## Follow-Up Search Strategy
+
+When the agent needs more information during iteration, it generates **search-optimized keyword phrases** (not verbose analytical questions) for better semantic/vector search.
+
+### Keyword Phrase Generation
+
+**OLD Approach (verbose questions):**
+```
+❌ "What specific revenue growth percentage was reported and how does
+   it compare to the previous quarter?"
+❌ "Did executives provide updated capex guidance for 2025, and what
+   portion was specifically tied to AI?"
+```
+
+**NEW Approach (search-optimized keywords):**
+```
+✅ "revenue growth percentage quarter comparison"
+✅ "capex guidance 2025 AI allocation"
+✅ "specific metrics last three quarters"
+```
+
+### Why Keyword Phrases?
+
+1. **Better semantic search**: Vector databases work better with declarative keyword phrases than natural language questions
+2. **Removes noise**: Question framing words ("What", "How", "Did") don't help retrieval
+3. **Focuses on entities**: Extracts core concepts, metrics, and temporal scope
+4. **Preserves context**: Includes tickers and time periods from original question
+
+### Parallel Execution
+
+Each keyword phrase searches **ALL target quarters** in parallel:
+
+```
+Example: "last 3 quarters" = [2024_q4, 2025_q1, 2025_q2]
+Follow-up phrases: ["capex guidance", "AI investments", "margin trends"]
+
+Execution:
+├── "capex guidance" → searches 2024_q4, 2025_q1, 2025_q2 (parallel)
+├── "AI investments" → searches 2024_q4, 2025_q1, 2025_q2 (parallel)
+└── "margin trends" → searches 2024_q4, 2025_q1, 2025_q2 (parallel)
+
+Result: All chunks deduped by citation, merged into context
+```
+
+This ensures comprehensive coverage - if "capex guidance" appears in Q2 and Q4, both chunks are retrieved.
 
 ---
 
@@ -367,7 +458,26 @@ PostgreSQL Table: transcript_chunks
 
 **Dedicated documentation:** [docs/SEC_AGENT.md](../docs/SEC_AGENT.md)
 
-The SEC agent retrieves data from 10-K filings using planning-driven parallel retrieval.
+**What it is:** A specialized **retrieval agent** optimized for extracting information from **SEC 10-K annual filings**. It uses planning-driven parallel retrieval with intelligent section routing and table selection.
+
+**Current scope:** 10-K filings only (annual reports). Support for 10-Q (quarterly) and 8-K (current events) is under development.
+
+**How the main agent uses it:**
+
+The main agent uses the SEC agent as a specialized data source tool. When the Question Analyzer (Stage 2) determines that a question requires 10-K data (based on semantic routing), it automatically invokes the SEC agent during Stage 2.6 of the pipeline.
+
+**Invocation flow:**
+1. Question Analyzer sets `data_source="10k"` or `needs_10k=true`
+2. Main agent calls SEC agent during Stage 2.6
+3. SEC agent performs its own iterative retrieval (up to 5 iterations)
+4. Results are formatted with `[10K1]`, `[10K2]` citation markers
+5. Context flows back into main agent's answer generation
+
+**Why a separate retrieval agent?** SEC 10-K filings have unique structure (15 sections, complex tables, financial statements) requiring specialized retrieval strategies. The SEC agent handles:
+- Section-level routing (Item 1, Item 7, Item 8, etc.)
+- LLM-based table selection from financial statements
+- Hybrid search (TF-IDF + semantic) with cross-encoder reranking
+- Planning-driven sub-question generation
 
 **Benchmark:** 91% accuracy on FinanceBench (112 questions), ~10s per question
 
@@ -410,14 +520,6 @@ The SEC agent retrieves data from 10-K filings using planning-driven parallel re
 - Parallel search execution for speed
 - Dynamic replanning based on evaluation gaps
 
-**Switching Versions:**
-```python
-# Current:
-from .sec_filings_service_smart_parallel import SmartParallelSECFilingsService as SECFilingsService
-
-# Iterative (legacy):
-from .sec_filings_service_iterative import IterativeSECFilingsService as SECFilingsService
-```
 
 ---
 
@@ -559,6 +661,51 @@ LOGFIRE_TOKEN=...            # Observability (optional)
 }
 ```
 
+### Answer Mode Config (`rag/config.py`)
+
+Controls iteration depth and quality thresholds:
+
+```python
+from enum import Enum
+
+class AnswerMode(str, Enum):
+    DIRECT = "direct"           # Quick factual answers
+    STANDARD = "standard"       # Balanced analysis (default)
+    DETAILED = "detailed"       # Comprehensive research
+    DEEP_SEARCH = "deep_search" # Exhaustive search (explicit only)
+
+ANSWER_MODE_CONFIG = {
+    AnswerMode.DIRECT: {
+        "max_iterations": 2,
+        "max_tokens": 2000,
+        "confidence_threshold": 0.7,
+    },
+    AnswerMode.STANDARD: {
+        "max_iterations": 3,
+        "max_tokens": 6000,
+        "confidence_threshold": 0.8,
+    },
+    AnswerMode.DETAILED: {
+        "max_iterations": 4,
+        "max_tokens": 16000,
+        "confidence_threshold": 0.9,
+    },
+    AnswerMode.DEEP_SEARCH: {
+        "max_iterations": 10,
+        "max_tokens": 20000,
+        "confidence_threshold": 0.95,
+    },
+}
+```
+
+**Important:** `deep_search` mode only triggers when user explicitly requests:
+- "search thoroughly"
+- "dig deep"
+- "exhaustive search"
+- "find everything"
+
+The agent will also nudge users with "Want me to search thoroughly?" or "Should I dig deeper?" when appropriate.
+
 ---
 
 ## Usage
@@ -605,7 +752,7 @@ async for event in agent.execute_rag_flow(
 
 | File | Description |
 |------|-------------|
-| `agent.py` | Main entry point - unified Agent API |
+| `__init__.py` | Public API — exports `Agent`, `RAGAgent`, `create_agent()` |
 | `agent_config.py` | Agent configuration and iteration settings |
 | `prompts.py` | Centralized LLM prompt templates (including planning) |
 | `rag/rag_agent.py` | Orchestration engine with pipeline stages |
@@ -616,8 +763,7 @@ async for event in agent.execute_rag_flow(
 | File | Tool | Description |
 |------|------|-------------|
 | `rag/search_engine.py` | Transcript Search | Hybrid vector + keyword search |
-| `rag/sec_filings_service_smart_parallel.py` | 10-K Search | Planning + parallel retrieval (default) |
-| `rag/sec_filings_service_iterative.py` | 10-K Search | Iterative table/text decisions (legacy) |
+| `rag/sec_filings_service_smart_parallel.py` | 10-K Agent | Planning-driven parallel retrieval |
 | `rag/tavily_service.py` | News Search | Real-time news via Tavily API |
 
 ### Supporting Components
@@ -681,70 +827,8 @@ PostgreSQL + pgvector
 
 ---
 
----
-
-## Evolution & Experiments
-
-The agent architecture evolved through extensive experimentation to achieve the current accuracy/speed balance.
-
-### Development History
-
-```
-Timeline of SEC 10-K Agent Development:
-
-v1: One-Pass Approach
-├── Simple: Fetch everything at once
-├── Fast but low accuracy
-└── Abandoned due to poor results
-
-v2: Iterative Approach (experiments/sec_filings_rag_scratch/)
-├── Step-by-step: LLM decides TABLE or TEXT at each iteration
-├── Achieved 91.3% accuracy on FinanceBench
-├── Problem: Slow (~170s per question)
-└── Still available as legacy fallback
-
-v3: SmartParallel Approach (CURRENT)
-├── Planning-driven: Generate sub-questions first
-├── Parallel: Execute all searches concurrently
-├── Same 91% accuracy, but 16x faster (~10s)
-└── Production default
-```
-
-### Key Insights from Experiments
-
-1. **Sub-questions > Original question**: The iterative approach used the SAME original question for every search iteration, getting identical text results. SmartParallel generates TARGETED sub-questions for each information need.
-
-2. **Parallel > Sequential**: Sequential iterations were the main bottleneck. Running searches in parallel with ThreadPoolExecutor provided 10-16x speedup.
-
-3. **Planning matters**: The planning phase generates a search strategy that identifies what TYPE of search (table vs text) is needed for each sub-question upfront.
-
-4. **Cerebras for speed**: Using Cerebras (Qwen-3-235B) instead of OpenAI reduced latency from 5-19s per call to 0.3-0.5s.
-
-### Benchmark Results
-
-| Version | Accuracy | Time/Question | Iterations |
-|---------|----------|---------------|------------|
-| SmartParallel | **91%** | **~10s** | 2.4 avg |
-| Iterative | 91.3% | ~170s | 5.8 avg |
-| Speed-Optimized Iterative | 80.4% | ~139s | 10 avg |
-
-### Experiment Directories
-
-See `experiments/` for development history:
-
-| Directory | Description |
-|-----------|-------------|
-| `sec_filings_rag_scratch/` | Original agent development, benchmark results, optimization analysis |
-| `sec_filings_rag/` | Hierarchical document parsing experiments |
-| `llamaindex_agent/` | Alternative LlamaIndex-based implementation |
-| `benchmarks/` | FinanceBench evaluation framework |
-
----
-
 ## Related Documentation
 
 - **[Main README](../README.md)** - Project overview and setup
-- **[SEC Agent](../docs/SEC_AGENT.md)** - Detailed 10-K agent: SmartParallel architecture, planning-driven retrieval
-- **[Agent Internals Deep Dive](../experiments/sec_filings_rag_scratch/docs/AGENT_INTERNALS_DEEP_DIVE.md)** - Technical internals reference
-- **[Optimization Findings](../experiments/sec_filings_rag_scratch/docs/OPTIMIZATION_FINDINGS.md)** - Performance analysis and benchmarks
+- **[SEC Agent](../docs/SEC_AGENT.md)** - Detailed 10-K agent: planning-driven retrieval, 91% accuracy
 - **[Data Ingestion](rag/data_ingestion/README.md)** - Transcript and 10-K ingestion pipelines

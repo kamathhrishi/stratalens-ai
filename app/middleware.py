@@ -13,7 +13,7 @@ from app.utils.logging_utils import log_info
 
 def setup_middleware(app: FastAPI):
     """Configure middleware for the FastAPI application"""
-    
+
     # Get CORS origins from centralized configuration
     allowed_origins = get_cors_origins()
     extended_origins = get_extended_cors_origins()

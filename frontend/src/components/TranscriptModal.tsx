@@ -16,6 +16,7 @@ interface TranscriptModalProps {
   ticker: string
   quarter: string
   relevantChunks: TranscriptChunk[]
+  panelMode?: boolean  // When true, renders as embedded panel content (no overlay)
 }
 
 interface TranscriptData {
@@ -71,6 +72,7 @@ function formatTranscriptWithSpeakers(transcriptText: string, relevantChunks: Tr
   let formattedText = transcriptText
   let hasSpeakers = false
   const commonWords = ['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'all', 'this', 'that']
+  let speakerIndex = 0
 
   // Apply formatting for each speaker pattern
   speakerPatterns.forEach(pattern => {
@@ -81,7 +83,9 @@ function formatTranscriptWithSpeakers(transcriptText: string, relevantChunks: Tr
         return match
       }
       hasSpeakers = true
-      return `<div class="speaker-section mb-6"><div class="speaker-name font-semibold text-[#0083f1] mb-2 text-base">${cleanSpeaker}:</div>`
+      const separatorClass = speakerIndex > 0 ? 'mt-7 pt-5 border-t border-slate-200' : ''
+      speakerIndex++
+      return `<div class="speaker-section mb-3 ${separatorClass}"><div class="speaker-name font-bold text-slate-900 mb-2 text-[15px] tracking-tight">${cleanSpeaker}:</div>`
     })
   })
 
@@ -160,7 +164,8 @@ export default function TranscriptModal({
   company,
   ticker,
   quarter,
-  relevantChunks
+  relevantChunks,
+  panelMode = false,
 }: TranscriptModalProps) {
   const [transcript, setTranscript] = useState<TranscriptData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -259,28 +264,8 @@ export default function TranscriptModal({
   const parsed = parseQuarter(quarter)
   const displayQuarter = parsed ? `Q${parsed.quarterNum} ${parsed.year}` : quarter
 
-  return (
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
-          onClick={onClose}
-        >
-          {/* Backdrop */}
-          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-
-          {/* Modal */}
-          <motion.div
-            initial={{ scale: 0.95, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="relative w-full max-w-4xl max-h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
+  const modalContent = (
+    <>
             {/* Header */}
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-gradient-to-r from-slate-50 to-white">
               <div>
@@ -351,12 +336,12 @@ export default function TranscriptModal({
                 </div>
               ) : error ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-4">
-                    <X className="w-8 h-8 text-red-500" />
+                  <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                    <FileText className="w-8 h-8 text-slate-400" />
                   </div>
-                  <p className="text-red-600 font-medium">{error}</p>
-                  <p className="text-slate-500 text-sm mt-2">
-                    The transcript may not be available in our database.
+                  <p className="text-slate-700 font-medium">Full earnings transcripts coming soon</p>
+                  <p className="text-slate-400 text-sm mt-2">
+                    We're expanding our transcript coverage. Check back shortly.
                   </p>
                 </div>
               ) : (
@@ -381,6 +366,35 @@ export default function TranscriptModal({
                 Download
               </button>
             </div>
+    </>
+  )
+
+  // Panel mode: fills the parent DocumentPanel
+  if (panelMode) {
+    return <div className="flex flex-col h-full overflow-hidden bg-white">{modalContent}</div>
+  }
+
+  // Modal mode: full-screen overlay
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+          onClick={onClose}
+        >
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            exit={{ scale: 0.95, opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="relative w-full max-w-4xl max-h-[90vh] bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {modalContent}
           </motion.div>
         </motion.div>
       )}

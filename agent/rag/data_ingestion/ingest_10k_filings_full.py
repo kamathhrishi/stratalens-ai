@@ -58,6 +58,7 @@ FINANCEBENCH_COMPANIES = {
     "Coca-Cola": "KO",
     "Corning": "GLW",
     "Costco": "COST",
+    "Foot Locker": "FL",
     "General Mills": "GIS",
     "JPMorgan": "JPM",
     "Johnson & Johnson": "JNJ",
@@ -191,6 +192,151 @@ SEC_10K_SECTIONS = {
     }
 }
 
+# SEC 10-Q Section definitions (quarterly report)
+SEC_10Q_SECTIONS = {
+    # Part I - Financial Information
+    "item_1": {
+        "title": "Financial Statements",
+        "keywords": ["financial statements", "balance sheet", "income statement", "cash flow", "condensed consolidated"]
+    },
+    "item_2": {
+        "title": "Management's Discussion and Analysis (MD&A)",
+        "keywords": ["md&a", "management discussion", "analysis", "performance", "results", "revenue", "sales", "liquidity"]
+    },
+    "item_3": {
+        "title": "Quantitative and Qualitative Disclosures About Market Risk",
+        "keywords": ["market risk", "quantitative", "qualitative", "risk disclosure", "hedging", "derivatives", "interest rate"]
+    },
+    "item_4": {
+        "title": "Controls and Procedures",
+        "keywords": ["controls", "procedures", "internal controls", "disclosure controls", "compliance"]
+    },
+    # Part II - Other Information
+    "item_1_p2": {
+        "title": "Legal Proceedings",
+        "keywords": ["legal proceedings", "litigation", "lawsuits", "court"]
+    },
+    "item_1a_p2": {
+        "title": "Risk Factors",
+        "keywords": ["risk factors", "risk", "risks", "uncertainty", "challenges"]
+    },
+    "item_2_p2": {
+        "title": "Unregistered Sales of Equity Securities",
+        "keywords": ["unregistered sales", "equity securities", "stock repurchase", "share repurchase"]
+    },
+    "item_5_p2": {
+        "title": "Other Information",
+        "keywords": ["other information"]
+    },
+    "item_6_p2": {
+        "title": "Exhibits",
+        "keywords": ["exhibits", "schedules", "attachments"]
+    },
+}
+
+# SEC 8-K Section definitions (current report, flat decimal-numbered items)
+SEC_8K_SECTIONS = {
+    "item_1.01": {
+        "title": "Entry into a Material Definitive Agreement",
+        "keywords": ["material definitive agreement", "entry into", "agreement"]
+    },
+    "item_1.02": {
+        "title": "Termination of a Material Definitive Agreement",
+        "keywords": ["termination", "material definitive agreement"]
+    },
+    "item_1.03": {
+        "title": "Bankruptcy or Receivership",
+        "keywords": ["bankruptcy", "receivership"]
+    },
+    "item_2.01": {
+        "title": "Completion of Acquisition or Disposition of Assets",
+        "keywords": ["acquisition", "disposition", "assets", "merger"]
+    },
+    "item_2.02": {
+        "title": "Results of Operations and Financial Condition",
+        "keywords": ["results of operations", "financial condition", "earnings", "quarterly results"]
+    },
+    "item_2.03": {
+        "title": "Creation of a Direct Financial Obligation",
+        "keywords": ["direct financial obligation", "off-balance sheet"]
+    },
+    "item_2.04": {
+        "title": "Triggering Events That Accelerate or Increase a Direct Financial Obligation",
+        "keywords": ["triggering events", "accelerate", "direct financial obligation"]
+    },
+    "item_2.05": {
+        "title": "Costs Associated with Exit or Disposal Activities",
+        "keywords": ["exit", "disposal", "restructuring", "costs associated"]
+    },
+    "item_2.06": {
+        "title": "Material Impairments",
+        "keywords": ["material impairments", "impairment", "write-down"]
+    },
+    "item_3.01": {
+        "title": "Notice of Delisting or Failure to Satisfy Listing Rule",
+        "keywords": ["delisting", "listing rule", "listing standard"]
+    },
+    "item_3.02": {
+        "title": "Unregistered Sales of Equity Securities",
+        "keywords": ["unregistered sales", "equity securities"]
+    },
+    "item_3.03": {
+        "title": "Material Modification to Rights of Security Holders",
+        "keywords": ["material modification", "rights", "security holders"]
+    },
+    "item_4.01": {
+        "title": "Changes in Registrant's Certifying Accountant",
+        "keywords": ["certifying accountant", "auditor change", "accounting firm"]
+    },
+    "item_4.02": {
+        "title": "Non-Reliance on Previously Issued Financial Statements",
+        "keywords": ["non-reliance", "restatement", "previously issued"]
+    },
+    "item_5.01": {
+        "title": "Changes in Control of Registrant",
+        "keywords": ["change in control", "change of control"]
+    },
+    "item_5.02": {
+        "title": "Departure/Election of Directors or Principal Officers",
+        "keywords": ["departure", "election", "director", "officer", "appointment", "resignation"]
+    },
+    "item_5.03": {
+        "title": "Amendments to Articles of Incorporation or Bylaws",
+        "keywords": ["amendment", "articles of incorporation", "bylaws"]
+    },
+    "item_5.07": {
+        "title": "Submission of Matters to a Vote of Security Holders",
+        "keywords": ["vote", "security holders", "shareholder vote", "annual meeting"]
+    },
+    "item_5.08": {
+        "title": "Shareholder Nominations",
+        "keywords": ["shareholder nominations", "director nominations"]
+    },
+    "item_7.01": {
+        "title": "Regulation FD Disclosure",
+        "keywords": ["regulation fd", "reg fd", "fair disclosure"]
+    },
+    "item_8.01": {
+        "title": "Other Events",
+        "keywords": ["other events", "other information"]
+    },
+    "item_9.01": {
+        "title": "Financial Statements and Exhibits",
+        "keywords": ["financial statements", "exhibits", "press release", "earnings release", "exhibit 99"]
+    },
+}
+
+# Map filing type to its section definitions
+FILING_TYPE_SECTIONS = {
+    '10-K': SEC_10K_SECTIONS,
+    '10-Q': SEC_10Q_SECTIONS,
+    '8-K': SEC_8K_SECTIONS,
+    'S-11': {},  # S-11 has no structured sections in datamule
+}
+
+# Map FinanceBench doc_type values to SEC filing type codes
+DOC_TYPE_TO_FILING_TYPE = {'10k': '10-K', '10q': '10-Q', '8k': '8-K'}
+
 class DataProcessor:
     """
     Handles data processing and embeddings for SEC RAG system
@@ -222,7 +368,37 @@ class DataProcessor:
         self.tables = {}  # Store tables separately
 
         logger.info(f"✅ Data Processor initialized")
-    
+
+    def _resolve_cache_dir(self, ticker, year, base_dir="embeddings_cache", filing_type='10-K', filing_period=None):
+        """
+        Resolve the cache directory for a given ticker/year/filing_type/filing_period.
+
+        Path structure:
+        - 10-K: embeddings_cache/TICKER/YEAR/10-K/ (or old path TICKER/YEAR/ for backward compat)
+        - 10-Q: embeddings_cache/TICKER/YEAR/10-Q/Q2/
+        - 8-K:  embeddings_cache/TICKER/YEAR/8-K/2023-08-30/
+
+        Args:
+            filing_period: Optional sub-key for the filing.
+                For 10-Q: quarter string like "Q2"
+                For 8-K: date string like "2023-08-30"
+                For 10-K: None (uses existing paths)
+        """
+        old_path = Path(base_dir) / ticker / str(year)
+        new_path = Path(base_dir) / ticker / str(year) / filing_type
+
+        # Add filing_period subdirectory for 10-Q and 8-K
+        if filing_period and filing_type in ('10-Q', '8-K'):
+            new_path = new_path / str(filing_period)
+
+        # Backward compatibility: if 10-K and old path has data, use it
+        if filing_type == '10-K' and old_path.exists() and (old_path / "chunks.pkl").exists():
+            # Check it's not actually a filing_type subdir
+            if not (old_path / "10-K").exists() or not (old_path / "10-K" / "chunks.pkl").exists():
+                return old_path
+
+        return new_path
+
     def prepare_chunks(self, filing_data, use_hierarchical=True, exclude_titles=True):
         """
         Convert content to searchable chunks for RAG
@@ -256,28 +432,67 @@ class DataProcessor:
                 # If this is a table chunk, store it in the tables dictionary
                 if chunk['type'] == 'table':
                     table_id = f"{ticker}_table_{table_index}"
+                    sec_section = chunk.get('sec_section', 'unknown')
+
+                    # Get structured table data if available
+                    table_data = chunk.get('metadata', {}).get('table_data', None)
+
+                    # Create LLM-friendly serialization if structured data exists
+                    # Otherwise fall back to original content
+                    if table_data and isinstance(table_data, list) and len(table_data) > 0:
+                        # Use improved serialization for better LLM comprehension
+                        improved_content = serialize_table_for_llm(table_data)
+                        if improved_content.strip():
+                            content_to_use = improved_content
+                            logger.debug(f"✨ Table {table_id}: Using LLM-friendly serialization")
+
+                    # For 10-Q filings, reclassify tables based on content when path detection fails
+                    filing_type = filing_data.get('_filing_type', '')
+                    if filing_type == '10-Q' and sec_section in ('unknown', ''):
+                        # Extract table title from first ~100 chars of content
+                        table_title = content_to_use[:100] if content_to_use else ''
+                        sec_section = reclassify_10q_table_by_content(
+                            content_to_use,
+                            table_title,
+                            sec_section
+                        )
+                        # Update chunk sec_section if reclassified
+                        if sec_section != chunk.get('sec_section', 'unknown'):
+                            chunk['sec_section'] = sec_section
+                            # Update section title based on new classification
+                            if sec_section == 'item_3':
+                                chunk['sec_section_title'] = 'Quantitative and Qualitative Disclosures About Market Risk'
+                            elif sec_section == 'item_1':
+                                chunk['sec_section_title'] = 'Financial Statements and Supplementary Data'
+                            elif sec_section == 'item_2':
+                                chunk['sec_section_title'] = "Management's Discussion and Analysis"
+
                     self.tables[table_id] = {
                         'id': table_id,
-                        'content': content_to_use,
-                        'table_data': chunk.get('metadata', {}).get('table_data', None),
+                        'content': content_to_use,  # Now uses improved serialization!
+                        'table_data': table_data,
                         'path': chunk.get('path', []),
                         'path_string': chunk.get('path_string', ''),
-                        'sec_section': chunk.get('sec_section', 'unknown'),
+                        'sec_section': sec_section,
                         'sec_section_title': chunk.get('sec_section_title', 'Unknown')
                     }
                     table_index += 1
 
+                # Update chunk with improved content and classification
+                chunk_sec_section = sec_section if chunk['type'] == 'table' else chunk.get('sec_section', 'unknown')
+                chunk_sec_title = chunk.get('sec_section_title', 'Unknown')
+
                 self.chunks.append({
                     'id': chunk['id'],
                     'ticker': ticker,
-                    'content': content_to_use,  # Original content only
+                    'content': content_to_use,  # May be improved table serialization
                     'original_content': chunk.get('original_content', chunk['content']),
                     'path': chunk.get('path', []),
                     'path_string': chunk.get('path_string', ''),
                     'type': chunk['type'],
                     'level': chunk.get('level', 0),
-                    'sec_section': chunk.get('sec_section', 'unknown'),  # Section ID
-                    'sec_section_title': chunk.get('sec_section_title', 'Unknown'),  # Section name
+                    'sec_section': chunk_sec_section,  # Updated section for tables
+                    'sec_section_title': chunk_sec_title,  # Section name
                     'context_before': chunk.get('context_before', []),
                     'context_after': chunk.get('context_after', [])
                 })
@@ -515,7 +730,7 @@ class DataProcessor:
 
         return financial_tables_index
 
-    def save_embeddings_to_disk(self, ticker, year, base_dir="embeddings_cache", hierarchical_data=None):
+    def save_embeddings_to_disk(self, ticker, year, base_dir="embeddings_cache", hierarchical_data=None, filing_type='10-K', filing_period=None):
         """
         Save embeddings and related data to disk for future reuse.
 
@@ -524,6 +739,8 @@ class DataProcessor:
             year: Fiscal year
             base_dir: Base directory for saving embeddings
             hierarchical_data: Optional hierarchical chunks and document data to save
+            filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+            filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
 
         Returns:
             Path to the saved data directory
@@ -532,8 +749,8 @@ class DataProcessor:
             logger.warning("⚠️  No embeddings to save")
             return None
 
-        # Create directory structure: embeddings_cache/TICKER/YEAR/
-        save_dir = Path(base_dir) / ticker / str(year)
+        # Create directory structure: embeddings_cache/TICKER/YEAR/FILING_TYPE/[PERIOD/]
+        save_dir = self._resolve_cache_dir(ticker, year, base_dir, filing_type, filing_period)
         save_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"💾 Saving embeddings and hierarchical data to {save_dir}...")
@@ -628,19 +845,21 @@ class DataProcessor:
             logger.error(f"❌ Failed to save embeddings: {e}")
             return None
     
-    def load_embeddings_from_disk(self, ticker, year, base_dir="embeddings_cache"):
+    def load_embeddings_from_disk(self, ticker, year, base_dir="embeddings_cache", filing_type='10-K', filing_period=None):
         """
         Load embeddings and related data from disk.
-        
+
         Args:
             ticker: Company ticker symbol
             year: Fiscal year
             base_dir: Base directory for loading embeddings
-            
+            filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+            filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
+
         Returns:
             True if successful, False otherwise
         """
-        load_dir = Path(base_dir) / ticker / str(year)
+        load_dir = self._resolve_cache_dir(ticker, year, base_dir, filing_type, filing_period)
         
         if not load_dir.exists():
             logger.warning(f"⚠️  Embeddings directory not found: {load_dir}")
@@ -716,19 +935,21 @@ class DataProcessor:
             logger.error(f"❌ Failed to load embeddings: {e}")
             return False
     
-    def load_hierarchical_data_from_disk(self, ticker, year, base_dir="embeddings_cache"):
+    def load_hierarchical_data_from_disk(self, ticker, year, base_dir="embeddings_cache", filing_type='10-K', filing_period=None):
         """
         Load hierarchical data from disk.
-        
+
         Args:
             ticker: Company ticker symbol
             year: Fiscal year
             base_dir: Base directory for loading data
-            
+            filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+            filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
+
         Returns:
             Dictionary with hierarchical data or None if not found
         """
-        load_dir = Path(base_dir) / ticker / str(year)
+        load_dir = self._resolve_cache_dir(ticker, year, base_dir, filing_type, filing_period)
         
         if not load_dir.exists():
             logger.warning(f"⚠️  Hierarchical data directory not found: {load_dir}")
@@ -789,39 +1010,43 @@ class DataProcessor:
             logger.error(f"❌ Failed to load hierarchical data: {e}")
             return None
     
-    def embeddings_exist_on_disk(self, ticker, year, base_dir="embeddings_cache"):
+    def embeddings_exist_on_disk(self, ticker, year, base_dir="embeddings_cache", filing_type='10-K', filing_period=None):
         """
         Check if embeddings exist on disk for given ticker and year.
-        
+
         Args:
             ticker: Company ticker symbol
             year: Fiscal year
             base_dir: Base directory for checking embeddings
-            
+            filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+            filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
+
         Returns:
             True if embeddings exist, False otherwise
         """
-        load_dir = Path(base_dir) / ticker / str(year)
+        load_dir = self._resolve_cache_dir(ticker, year, base_dir, filing_type, filing_period)
         required_files = ["chunks.pkl", "embeddings.npy", "tfidf_vectorizer.pkl", "tfidf_matrix.pkl", "metadata.pkl"]
-        
+
         if not load_dir.exists():
             return False
-        
+
         return all((load_dir / file).exists() for file in required_files)
-    
-    def hierarchical_data_exist_on_disk(self, ticker, year, base_dir="embeddings_cache"):
+
+    def hierarchical_data_exist_on_disk(self, ticker, year, base_dir="embeddings_cache", filing_type='10-K', filing_period=None):
         """
         Check if hierarchical data exists on disk for given ticker and year.
-        
+
         Args:
             ticker: Company ticker symbol
             year: Fiscal year
             base_dir: Base directory for checking data
-            
+            filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+            filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
+
         Returns:
             True if hierarchical data exists, False otherwise
         """
-        load_dir = Path(base_dir) / ticker / str(year)
+        load_dir = self._resolve_cache_dir(ticker, year, base_dir, filing_type, filing_period)
         required_files = ["hierarchical_chunks.pkl", "contextual_chunks.pkl", "document_text.txt", "document_metadata.pkl"]
         
         if not load_dir.exists():
@@ -1014,43 +1239,109 @@ def extract_text(data):
     chunks = extract_hierarchical_content(doc_data)
     return ' '.join(chunk['content'] for chunk in chunks if chunk.get('content'))
 
-def identify_section_from_path(path_list):
+def identify_section_from_path(path_list, sections_map=None):
     """
     Identify SEC section from hierarchical path.
-    
+
     Args:
         path_list: List of path elements (e.g., ['Part I', 'Item 1', 'Business'])
-    
+        sections_map: Section definitions dict (defaults to SEC_10K_SECTIONS)
+
     Returns:
         String like 'item_1', 'item_7a', etc. or 'unknown'
     """
     if not path_list:
         return 'unknown'
-    
+
+    if sections_map is None:
+        sections_map = SEC_10K_SECTIONS
+
     # Convert path to lowercase string
     path_string = " > ".join(path_list).lower()
-    
+
+    # Exhibit attachments (EX-99.1, EX-99.2, etc.) belong to item_9.01
+    # ("Financial Statements and Exhibits") in 8-K filings.
+    # Check the top-level path element for exhibit markers.
+    if path_list and path_list[0].lower().startswith('exhibit'):
+        if 'item_9.01' in sections_map:
+            return 'item_9.01'
+
     # Check each SEC section
-    for section_key, section_data in SEC_10K_SECTIONS.items():
-        # Extract item number (e.g., "1", "7a")
+    for section_key, section_data in sections_map.items():
+        # Extract item number (e.g., "1", "7a", "1.01")
         item_num = section_key.replace('item_', '')
-        
+
         # Check if path contains "item X" or section keywords
+        # Handle both "item 1" and "item 1.01" style numbering
         if f"item {item_num}" in path_string or f"item{item_num}" in path_string:
             return section_key
-        
+
         # Check keywords
         for keyword in section_data['keywords']:
             if keyword in path_string:
                 return section_key
-    
+
     return 'unknown'
+
+
+def reclassify_10q_table_by_content(table_content, table_title, current_section):
+    """
+    Reclassify 10-Q tables based on content when path-based detection fails.
+
+    This addresses the issue where tables in "TABLE OF CONTENTS" sections
+    don't have proper section context in their paths, causing them to be
+    marked as "unknown" even though they contain section-specific data.
+
+    Args:
+        table_content: String content of the table
+        table_title: Title/first row of the table (if available)
+        current_section: Currently assigned section (e.g., 'unknown')
+
+    Returns:
+        Reclassified section ID or original if no match
+    """
+    # Only reclassify if current section is unknown or too generic
+    if current_section not in ('unknown', ''):
+        return current_section
+
+    content_lower = (table_content or '').lower()
+    title_lower = (table_title or '').lower()
+    combined = f"{content_lower} {title_lower}"
+
+    # Item 3: Market Risk - VaR tables
+    if any(keyword in combined for keyword in ['value at risk', 'var ', ' var', 'risk management var', 'trading var', 'cib var']):
+        # Exclude false positives like "variable" or "various"
+        if 'variable' not in combined and 'various' not in combined and 'variance' not in combined:
+            return 'item_3'
+
+    # Item 3: Market Risk - Interest rate sensitivity
+    if 'interest rate' in combined and any(term in combined for term in ['sensitivity', 'maturity', 'maturities', 'rate risk']):
+        return 'item_3'
+
+    # Item 1: Financial Statements - Debt securities tables
+    if 'debt securities' in combined and any(term in combined for term in ['registered', 'securities exchange', 'trading']):
+        return 'item_1'
+
+    # Item 1: Financial Statements - Segment tables with revenue/income
+    if 'segment' in combined and any(term in combined for term in ['net income', 'net revenue', 'operating income', 'segment results']):
+        return 'item_1'
+
+    # Item 2: MD&A - Store counts, product categories (retail-specific)
+    if any(term in combined for term in ['store count', 'number of stores', 'stores opened', 'stores closed', 'retail locations']):
+        return 'item_2'
+
+    if 'product category' in combined or 'category revenue' in combined or 'category performance' in combined:
+        return 'item_2'
+
+    # Return original if no match
+    return current_section
+
 
 def _format_table(table_data):
     """Convert table data to readable text format"""
     if not table_data:
         return ""
-    
+
     if isinstance(table_data, list) and len(table_data) > 0:
         # Assume first row is header
         if isinstance(table_data[0], list):
@@ -1060,31 +1351,104 @@ def _format_table(table_data):
             return "\n".join(rows)
         else:
             return str(table_data)
-    
+
     return str(table_data)
 
-def create_contextual_chunks(hierarchical_chunks, window_size=3, combine_short=True, min_chunk_size=100):
+
+def serialize_table_for_llm(table_data, max_rows=50):
+    """
+    Serialize structured table data in an LLM-friendly format.
+
+    Converts a 2D array (rows x columns) into clear, labeled text that LLMs can parse easily.
+
+    Args:
+        table_data: 2D list/array where table_data[0] is typically headers
+        max_rows: Maximum number of data rows to include (to prevent huge tables)
+
+    Returns:
+        String with format like:
+        "HEADERS: Col1 | Col2 | Col3
+         ROW 1: Value1 | Value2 | Value3
+         ROW 2: Value1 | Value2 | Value3"
+
+    Example:
+        Input: [['Period', 'Average', 'Min'],
+                ['Q2 2023', '$47M', '$36M'],
+                ['Q2 2022', '$54M', '$42M']]
+        Output: "HEADERS: Period | Average | Min
+                 ROW 1: Q2 2023 | $47M | $36M
+                 ROW 2: Q2 2022 | $54M | $42M"
+    """
+    if not table_data or not isinstance(table_data, list) or len(table_data) == 0:
+        return ""
+
+    # Ensure all rows are lists
+    if not isinstance(table_data[0], list):
+        return str(table_data)
+
+    lines = []
+
+    # Detect if first row is header (contains text, not numbers, or is distinct from other rows)
+    first_row = table_data[0]
+    has_header = True
+
+    # Check if first row looks like a header (not all empty, has text)
+    if all(str(cell).strip() == '' for cell in first_row):
+        has_header = False
+
+    start_row = 0
+    if has_header:
+        # Format header row
+        header_text = " | ".join(str(cell).strip() for cell in first_row)
+        lines.append(f"HEADERS: {header_text}")
+        start_row = 1
+
+    # Format data rows with row numbers
+    data_rows = table_data[start_row:min(len(table_data), start_row + max_rows)]
+    for i, row in enumerate(data_rows, 1):
+        # Clean and join cells
+        cleaned_cells = []
+        for cell in row:
+            cell_str = str(cell).strip()
+            # Remove excessive whitespace
+            cell_str = ' '.join(cell_str.split())
+            cleaned_cells.append(cell_str)
+
+        row_text = " | ".join(cleaned_cells)
+        lines.append(f"ROW {i}: {row_text}")
+
+    # If table was truncated, add note
+    if len(table_data) - start_row > max_rows:
+        lines.append(f"... ({len(table_data) - start_row - max_rows} more rows omitted)")
+
+    return "\n".join(lines)
+
+def create_contextual_chunks(hierarchical_chunks, window_size=3, combine_short=True, min_chunk_size=100, sections_map=None):
     """
     Create chunks from hierarchical content with metadata (context tracking for reference only).
-    
+
     Args:
         hierarchical_chunks: Output from extract_hierarchical_content
         window_size: Number of surrounding chunks to track for metadata
         combine_short: (Deprecated - not used)
         min_chunk_size: (Deprecated - not used)
-    
+        sections_map: Section definitions dict (defaults to SEC_10K_SECTIONS)
+
     Returns:
         List of chunks with hierarchical metadata and SEC section identification
     """
+    if sections_map is None:
+        sections_map = SEC_10K_SECTIONS
+
     contextual_chunks = []
-    
+
     for i, chunk in enumerate(hierarchical_chunks):
         # Build context string from path
         context_path = " > ".join(chunk['path']) if chunk['path'] else "Document Root"
-        
+
         # Identify SEC section from path
-        sec_section = identify_section_from_path(chunk['path'])
-        sec_section_title = SEC_10K_SECTIONS.get(sec_section, {}).get('title', 'Unknown')
+        sec_section = identify_section_from_path(chunk['path'], sections_map=sections_map)
+        sec_section_title = sections_map.get(sec_section, {}).get('title', 'Unknown')
         
         # Get surrounding context (for better RAG)
         context_before = []
@@ -1381,11 +1745,373 @@ def download_and_extract_10k(ticker, start_year, end_year):
     return filings_by_year
 
 
-def create_embeddings_for_filing_data(filing_data, ticker, year, use_hierarchical=True, exclude_titles=True, cache_dir="embeddings_cache"):
+def _create_raw_text_chunks(text, chunk_size=1500, overlap=200):
+    """
+    Split raw text into overlapping chunks for filings without structured parsing (e.g., S-11).
+
+    Args:
+        text: Raw text content
+        chunk_size: Target size of each chunk in characters
+        overlap: Number of overlapping characters between chunks
+
+    Returns:
+        List of chunk dicts with content, path, type, and level
+    """
+    chunks = []
+    if not text or len(text.strip()) < 50:
+        return chunks
+
+    start = 0
+    chunk_idx = 0
+    while start < len(text):
+        end = start + chunk_size
+
+        # Try to break at sentence boundary
+        if end < len(text):
+            # Look for a period, newline, or other sentence boundary near the end
+            for boundary_char in ['. ', '.\n', '\n\n', '\n']:
+                boundary_pos = text.rfind(boundary_char, start + chunk_size // 2, end + 100)
+                if boundary_pos != -1:
+                    end = boundary_pos + len(boundary_char)
+                    break
+
+        chunk_text = text[start:end].strip()
+        if len(chunk_text) >= 50:
+            chunks.append({
+                'content': chunk_text,
+                'path': [f'Section {chunk_idx + 1}'],
+                'type': 'text',
+                'level': 0
+            })
+            chunk_idx += 1
+
+        start = end - overlap if end < len(text) else len(text)
+
+    return chunks
+
+
+def download_and_extract_filing(ticker, start_year, end_year, filing_type='10-K', max_filings=None, filing_date_override=None, target_period_date=None):
+    """
+    Download and extract SEC filings for a given ticker, year range, and filing type.
+
+    Supports: '10-K', '10-Q', '8-K', 'S-11'
+
+    Args:
+        ticker: Company ticker symbol
+        start_year: Start year for filing search
+        end_year: End year for filing search
+        filing_type: SEC filing type ('10-K', '10-Q', '8-K', 'S-11')
+        max_filings: Maximum number of filings to process (useful for 8-K which can be very frequent)
+        filing_date_override: Optional tuple (start_date, end_date) as strings like ('2023-07-01', '2023-09-30')
+                              to narrow the SEC EDGAR search range instead of using the full year range.
+        target_period_date: Optional target period-of-report date as 'YYYYMM' (e.g., '202306' for June 2023).
+                            When set, downloads all filings in range and picks the one whose period end date
+                            (extracted from datamule doc.path) is closest to this target month.
+                            This fixes the wrong-quarter bug for 10-Q downloads.
+
+    Returns:
+        Dict organized by key:
+        - 10-K/10-Q: keyed by fiscal_year (int)
+        - 8-K: keyed by filing_date string (YYYY-MM-DD) since 8-K is event-driven
+        - S-11: keyed by fiscal_year (int)
+    """
+    # For 10-K, delegate to the original function (preserves backward compatibility)
+    if filing_type == '10-K':
+        return download_and_extract_10k(ticker, start_year, end_year)
+
+    sections_map = FILING_TYPE_SECTIONS.get(filing_type, {})
+
+    # Use filing_date_override for narrow date targeting, otherwise full year range
+    if filing_date_override:
+        date_range = filing_date_override
+        # For 8-K, extract target date from override to use as the merge key
+        # This ensures all 8-Ks from the same date range get the same key and are merged
+        if filing_type == '8-K' and isinstance(filing_date_override, tuple):
+            # Use the midpoint date as the key for merging
+            from datetime import datetime, timedelta
+            start_dt = datetime.strptime(filing_date_override[0], '%Y-%m-%d')
+            end_dt = datetime.strptime(filing_date_override[1], '%Y-%m-%d')
+            midpoint_dt = start_dt + (end_dt - start_dt) / 2
+            target_filing_date = midpoint_dt.strftime('%Y-%m-%d')
+        else:
+            target_filing_date = None
+    else:
+        date_range = (f'{start_year}-01-01', f'{end_year}-12-31')
+        target_filing_date = None
+
+    portfolio = Portfolio(ticker)
+
+    # For 8-K filings, also download common exhibits (press releases, financial data)
+    # Exhibits are separate submission types in SEC EDGAR
+    if filing_type == '8-K':
+        submission_types = [filing_type, 'EX-99.1', 'EX-99.2', 'EX-99.3', 'EX-99.4', 'EX-99.5']
+        logger.info(f"📎 Downloading 8-K with exhibits: {submission_types}")
+    else:
+        submission_types = [filing_type]
+
+    portfolio.download_submissions(
+        ticker=ticker,
+        filing_date=date_range,
+        submission_type=submission_types)
+
+    # When target_period_date is set, select the best-matching document by period-of-report
+    # instead of relying on max_filings (which returns the oldest/first filing).
+    all_documents = list(portfolio.document_type(filing_type))
+
+    if target_period_date and len(all_documents) >= 1:
+        logger.info(f"🎯 Period matching: looking for period closest to {target_period_date} among {len(all_documents)} documents")
+        target_ym = target_period_date[:6]  # 'YYYYMM'
+
+        # Extract period date from each document's FILENAME (not full path).
+        # Full path includes accession numbers (e.g., '000001961723000432.tar::jpm-20230630.htm')
+        # which contain 8-digit sequences that are NOT dates. The actual period date is in the
+        # filename after '::' (e.g., 'jpm-20230630.htm').
+        doc_periods = []
+        for doc in all_documents:
+            path_str = str(getattr(doc, 'path', ''))
+            # Extract filename part (after :: in tar paths, or last path component)
+            filename = path_str.split('::')[-1] if '::' in path_str else path_str.split('/')[-1]
+            period_match = re.search(r'((?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))', filename)
+            if period_match:
+                doc_periods.append((doc, period_match.group(1)[:6], period_match.group(1)))
+                logger.info(f"   📄 {filename} → period {period_match.group(1)}")
+            else:
+                doc_periods.append((doc, None, None))
+                logger.info(f"   📄 {filename} → no period date found")
+
+        # Pick the document whose period YYYYMM is closest to target
+        best_doc = None
+        best_distance = float('inf')
+        for doc, period_ym, full_date in doc_periods:
+            if period_ym:
+                target_y, target_m = int(target_ym[:4]), int(target_ym[4:6])
+                period_y, period_m = int(period_ym[:4]), int(period_ym[4:6])
+                distance = abs((target_y - period_y) * 12 + (target_m - period_m))
+                if distance < best_distance:
+                    best_distance = distance
+                    best_doc = doc
+                    logger.info(f"   ✅ Best match so far: period {full_date} (distance={distance} months)")
+
+        if best_doc:
+            all_documents = [best_doc]
+            logger.info(f"🎯 Selected document with period distance={best_distance} months from target {target_period_date}")
+        else:
+            logger.warning(f"⚠️  No documents had extractable period dates, using all documents")
+
+    filings_by_key = {}
+    filing_count = 0
+
+    for document in all_documents:
+        if max_filings and filing_count >= max_filings:
+            logger.info(f"⏭️  Reached max_filings limit ({max_filings}), stopping")
+            break
+
+        try:
+            document.parse()
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to parse {filing_type} document: {e}")
+            # For S-11 or problematic docs, try raw text extraction
+            if filing_type == 'S-11':
+                logger.info(f"📄 Falling back to raw text extraction for S-11")
+                try:
+                    raw_text = extract_text(document.data) if hasattr(document, 'data') and document.data else ""
+                    if raw_text and len(raw_text.strip()) > 100:
+                        hierarchical_chunks = _create_raw_text_chunks(raw_text)
+                        contextual_chunks = create_contextual_chunks(hierarchical_chunks, sections_map=sections_map)
+                        fiscal_year = extract_fiscal_year(document.data) if hasattr(document, 'data') else None
+                        fiscal_year = int(fiscal_year) if fiscal_year else start_year
+                        table_count = 0
+                        text_preview = raw_text[:300].replace('\n', ' ')
+
+                        filings_by_key[fiscal_year] = {
+                            "hierarchical_chunks": hierarchical_chunks,
+                            "contextual_chunks": contextual_chunks,
+                            "document_text": raw_text,
+                            "text_preview": text_preview,
+                            "document_length": len(raw_text),
+                            "_table_count": table_count,
+                            "_filing_type": filing_type,
+                        }
+                        filing_count += 1
+                        logger.info(f"✅ Stored S-11 data (raw text, {len(hierarchical_chunks)} chunks)")
+                        continue
+                except Exception as e2:
+                    logger.warning(f"⚠️  Raw text extraction also failed: {e2}")
+            continue
+
+        logger.info(f"🌳 Parsing {filing_type} hierarchical structure...")
+
+        # Handle both wrapped and unwrapped document structures
+        doc_data = document.data.get('document', document.data) if isinstance(document.data, dict) else document.data
+
+        # Determine the filing key
+        if filing_type == '8-K':
+            # 8-K is event-driven: use filing date as key
+            # IMPORTANT: If target_filing_date is set (from filing_date_override), use it for ALL 8-Ks
+            # This ensures multiple 8-Ks from the same date get merged into one cache
+            if target_filing_date:
+                filing_key = target_filing_date  # Use the target date for merging
+                logger.info(f"📅 Using target filing date as key for merging: {filing_key}")
+            else:
+                # Try to extract a filing date from the document metadata
+                fiscal_year = extract_fiscal_year(document.data)
+                filing_date = None
+
+                if isinstance(document.data, dict):
+                    metadata = document.data.get('metadata', {})
+                    if isinstance(metadata, dict):
+                        filing_date = metadata.get('filing_date') or metadata.get('date')
+
+                if filing_date:
+                    filing_key = str(filing_date)[:10]  # YYYY-MM-DD
+                elif fiscal_year:
+                    # Use fiscal year + count as fallback key
+                    base_key = int(fiscal_year)
+                    filing_key = base_key
+                    # Avoid key collisions for multiple 8-Ks in same year
+                    suffix = 1
+                    while filing_key in filings_by_key:
+                        filing_key = f"{base_key}_{suffix}"
+                        suffix += 1
+                else:
+                    filing_key = f"unknown_{filing_count}"
+                    logger.warning(f"⚠️  Could not extract date/year for 8-K, using key: {filing_key}")
+        else:
+            # 10-Q and S-11: use fiscal year
+            fiscal_year = extract_fiscal_year(document.data)
+            if not fiscal_year:
+                logger.warning(f"⚠️  Could not extract fiscal year for {filing_type}, skipping document")
+                continue
+            filing_key = int(fiscal_year)
+
+        logger.info(f"📅 Processing {filing_type} with key: {filing_key}")
+
+        # Extract hierarchical content
+        hierarchical_chunks = extract_hierarchical_content(doc_data)
+        logger.info(f"📦 Extracted {len(hierarchical_chunks)} hierarchical chunks")
+
+        # For S-11 with no structured content, fall back to raw text
+        if filing_type == 'S-11' and len(hierarchical_chunks) < 5:
+            logger.info(f"📄 S-11 has minimal structure, using raw text chunking")
+            raw_text = extract_text(document.data)
+            if raw_text and len(raw_text.strip()) > 100:
+                hierarchical_chunks = _create_raw_text_chunks(raw_text)
+                logger.info(f"📦 Created {len(hierarchical_chunks)} raw text chunks for S-11")
+
+        # Extract document text
+        document_text = extract_text(document.data)
+        logger.info(f"📄 Document length: {len(document_text)} characters")
+
+        text_preview = document_text[:300].replace('\n', ' ') if document_text else ""
+
+        # Create contextual chunks with the appropriate section map
+        logger.info(f"🔗 Creating contextual chunks with {filing_type} sections...")
+        contextual_chunks = create_contextual_chunks(hierarchical_chunks, sections_map=sections_map)
+        logger.info(f"✅ Created {len(contextual_chunks)} contextual chunks")
+
+        table_count = sum(1 for chunk in hierarchical_chunks if chunk.get('type') == 'table')
+
+        # Store tar prefix for exhibit matching (8-K)
+        doc_path = str(getattr(document, 'path', ''))
+        tar_prefix = doc_path.split('::')[0] if '::' in doc_path else ''
+
+        # Store data
+        filing_data = {
+            "hierarchical_chunks": hierarchical_chunks,
+            "contextual_chunks": contextual_chunks,
+            "document_text": document_text,
+            "text_preview": text_preview,
+            "document_length": len(document_text),
+            "_table_count": table_count,
+            "_filing_type": filing_type,
+            "_tar_prefix": tar_prefix,
+        }
+
+        if filing_key in filings_by_key:
+            if filing_type == '8-K':
+                # Merge multiple 8-Ks from the same date (e.g., earnings + AGM voting)
+                existing = filings_by_key[filing_key]
+                existing['hierarchical_chunks'].extend(hierarchical_chunks)
+                existing['contextual_chunks'].extend(contextual_chunks)
+                existing['document_text'] += "\n\n---\n\n" + document_text
+                existing['_table_count'] += table_count
+                existing['document_length'] += len(document_text)
+                logger.info(f"📊 Merged additional 8-K content into key {filing_key} (now {existing['_table_count']} tables, {len(existing['hierarchical_chunks'])} chunks)")
+            else:
+                # For 10-K/10-Q, keep the one with more tables (original logic)
+                existing_table_count = filings_by_key[filing_key].get('_table_count', 0)
+                if table_count > existing_table_count:
+                    logger.info(f"📊 Replacing previous data for key {filing_key} ({existing_table_count} tables → {table_count} tables)")
+                    filings_by_key[filing_key] = filing_data
+                else:
+                    logger.info(f"📊 Keeping previous data for key {filing_key}")
+        else:
+            filings_by_key[filing_key] = filing_data
+            logger.info(f"✅ Stored {filing_type} data for key {filing_key} ({table_count} tables)")
+
+        filing_count += 1
+
+    # After processing all 8-K documents, also extract exhibit content
+    if filing_type == '8-K':
+        EXHIBIT_TYPES = ['EX-99.1', 'EX-99.2', 'EX-99.3']
+        for ex_type in EXHIBIT_TYPES:
+            try:
+                exhibit_docs = list(portfolio.document_type(ex_type))
+            except Exception:
+                exhibit_docs = []
+            for ex_doc in exhibit_docs:
+                # Match exhibit to parent 8-K by shared tar archive (accession number)
+                ex_tar = str(ex_doc.path).split('::')[0] if '::' in str(ex_doc.path) else ''
+
+                # Find which filing_key this exhibit belongs to
+                parent_key = None
+                for fkey, fdata in filings_by_key.items():
+                    if fdata.get('_tar_prefix') == ex_tar and ex_tar:
+                        parent_key = fkey
+                        break
+
+                if parent_key is None:
+                    # Fallback: merge into the single available 8-K if there's only one
+                    if len(filings_by_key) == 1:
+                        parent_key = list(filings_by_key.keys())[0]
+                    else:
+                        logger.warning(f"⚠️  Could not match exhibit {ex_type} to a parent 8-K, skipping")
+                        continue
+
+                try:
+                    ex_doc.parse()
+                    ex_data = ex_doc.data.get('document', ex_doc.data) if isinstance(ex_doc.data, dict) else ex_doc.data
+
+                    # Wrap exhibit content under an "Exhibit X" path prefix
+                    ex_hier_chunks = extract_hierarchical_content(ex_data)
+                    for chunk in ex_hier_chunks:
+                        chunk['path'] = [f'Exhibit ({ex_type})'] + chunk.get('path', [])
+                        chunk['exhibit_source'] = ex_type
+
+                    ex_text = extract_text(ex_doc.data)
+                    ex_ctx_chunks = create_contextual_chunks(ex_hier_chunks, sections_map=sections_map)
+
+                    # Merge into parent 8-K
+                    existing = filings_by_key[parent_key]
+                    existing['hierarchical_chunks'].extend(ex_hier_chunks)
+                    existing['contextual_chunks'].extend(ex_ctx_chunks)
+                    existing['document_text'] += f"\n\n--- {ex_type} ---\n\n" + ex_text
+                    ex_table_count = sum(1 for c in ex_hier_chunks if c.get('type') == 'table')
+                    existing['_table_count'] += ex_table_count
+                    existing['document_length'] += len(ex_text)
+                    logger.info(f"📎 Extracted exhibit {ex_type} → parent {parent_key}: {len(ex_hier_chunks)} chunks, {ex_table_count} tables, {len(ex_text)} chars")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to parse exhibit {ex_type}: {e}")
+
+    logger.info(f"📦 Total {filing_type} filings processed: {filing_count}, unique keys: {len(filings_by_key)}")
+    return filings_by_key
+
+
+def create_embeddings_for_filing_data(filing_data, ticker, year, use_hierarchical=True, exclude_titles=True, cache_dir="embeddings_cache", filing_type='10-K', filing_period=None):
     """
     Create embeddings for filing data during data loading phase.
     Uses disk caching to avoid recreating embeddings and hierarchical data if they already exist.
-    
+
     Args:
         filing_data: Filing data for a specific year
         ticker: Company ticker symbol
@@ -1393,21 +2119,23 @@ def create_embeddings_for_filing_data(filing_data, ticker, year, use_hierarchica
         use_hierarchical: Whether to use hierarchical chunks
         exclude_titles: Whether to exclude title/heading chunks
         cache_dir: Directory for caching embeddings
-        
+        filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+        filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
+
     Returns:
         Dictionary containing processed data with embeddings
     """
-    logger.info(f"🧠 Creating embeddings for {ticker} {year}...")
-    
+    logger.info(f"🧠 Creating embeddings for {ticker} {year} {filing_type} period={filing_period}...")
+
     # Create data processor
     processor = DataProcessor()
-    
+
     # Check if embeddings already exist on disk
-    if processor.embeddings_exist_on_disk(ticker, year, cache_dir):
+    if processor.embeddings_exist_on_disk(ticker, year, cache_dir, filing_type, filing_period):
         logger.info(f"📥 Found existing embeddings for {ticker} {year}, loading from disk...")
-        
+
         # Load existing embeddings
-        if processor.load_embeddings_from_disk(ticker, year, cache_dir):
+        if processor.load_embeddings_from_disk(ticker, year, cache_dir, filing_type, filing_period):
             logger.info(f"✅ Successfully loaded cached embeddings for {ticker} {year}")
         else:
             logger.warning(f"⚠️  Failed to load cached embeddings, will create new ones")
@@ -1430,7 +2158,7 @@ def create_embeddings_for_filing_data(filing_data, ticker, year, use_hierarchica
     
     # Save embeddings and hierarchical data to disk for future use
     logger.info(f"💾 Saving embeddings and hierarchical data to disk for future use...")
-    save_path = processor.save_embeddings_to_disk(ticker, year, cache_dir, filing_data)
+    save_path = processor.save_embeddings_to_disk(ticker, year, cache_dir, filing_data, filing_type=filing_type, filing_period=filing_period)
     if save_path:
         logger.info(f"✅ Embeddings and hierarchical data saved to {save_path}")
     else:
@@ -1461,8 +2189,8 @@ def create_embeddings_for_filing_data(filing_data, ticker, year, use_hierarchica
             'embedding_shape': embeddings.shape if embeddings is not None else None,
             'tfidf_shape': tfidf_matrix.shape if tfidf_matrix is not None else None,
             'created_at': datetime.now().isoformat(),
-            'cached': processor.embeddings_exist_on_disk(ticker, year, cache_dir),
-            'hierarchical_cached': processor.hierarchical_data_exist_on_disk(ticker, year, cache_dir)
+            'cached': processor.embeddings_exist_on_disk(ticker, year, cache_dir, filing_type, filing_period),
+            'hierarchical_cached': processor.hierarchical_data_exist_on_disk(ticker, year, cache_dir, filing_type, filing_period)
         }
     }
     
@@ -1470,200 +2198,7 @@ def create_embeddings_for_filing_data(filing_data, ticker, year, use_hierarchica
     
     return enhanced_filing_data
 
-# =============================================================================
-# FINQUAL INTEGRATION
-# =============================================================================
-
-def fetch_finqual_statements(ticker, year):
-    """
-    Fetch clean financial statements from finqual for a given ticker and year.
-
-    Args:
-        ticker: Company ticker symbol
-        year: Fiscal year
-
-    Returns:
-        Dictionary with finqual data:
-        {
-            'income_statement': polars DataFrame or None,
-            'balance_sheet': polars DataFrame or None,
-            'cash_flow': polars DataFrame or None,
-            'income_statement_str': string representation or None,
-            'balance_sheet_str': string representation or None,
-            'cash_flow_str': string representation or None
-        }
-    """
-    try:
-        import finqual as fq
-        logger.info(f"📊 Fetching finqual statements for {ticker} {year}...")
-
-        finqual_data = {
-            'income_statement': None,
-            'balance_sheet': None,
-            'cash_flow': None,
-            'income_statement_str': None,
-            'balance_sheet_str': None,
-            'cash_flow_str': None
-        }
-
-        company = fq.Finqual(ticker)
-
-        # Helper to convert Polars DataFrame to full string (no truncation)
-        def df_to_full_string(df):
-            """Convert Polars DataFrame to complete string without truncation."""
-            if df is None or df.is_empty():
-                return None
-            
-            # Method 1: Use write_csv to get complete data as formatted table
-            # This ensures ALL rows are included
-            try:
-                import io
-                # Get column names
-                cols = df.columns
-                
-                # Build a formatted table string with ALL rows
-                lines = []
-                
-                # Header
-                lines.append("| " + " | ".join(cols) + " |")
-                lines.append("|" + "|".join(["---" for _ in cols]) + "|")
-                
-                # All data rows (no truncation!)
-                for row in df.iter_rows():
-                    formatted_row = []
-                    for val in row:
-                        if val is None:
-                            formatted_row.append("N/A")
-                        elif isinstance(val, float):
-                            # Format large numbers with commas, keep decimals for small numbers
-                            if abs(val) >= 1e6:
-                                formatted_row.append(f"{val:,.0f}")
-                            elif abs(val) >= 1:
-                                formatted_row.append(f"{val:,.2f}")
-                            else:
-                                formatted_row.append(f"{val:.4f}")
-                        else:
-                            formatted_row.append(str(val))
-                    lines.append("| " + " | ".join(formatted_row) + " |")
-                
-                result = f"Financial Statement ({df.shape[0]} rows x {df.shape[1]} columns)\n"
-                result += "\n".join(lines)
-                return result
-                
-            except Exception as e:
-                # Fallback: use Polars with max rows config
-                import polars as pl
-                with pl.Config(tbl_rows=-1, tbl_cols=-1):
-                    return str(df)
-
-        # Fetch income statement
-        try:
-            df = company.income_stmt(year)
-            if df is not None and not df.is_empty():
-                finqual_data['income_statement'] = df
-                finqual_data['income_statement_str'] = df_to_full_string(df)
-                logger.info(f"   ✅ Income statement: {df.shape}")
-        except Exception as e:
-            logger.warning(f"   ⚠️  Could not fetch income statement: {e}")
-
-        # Fetch balance sheet
-        try:
-            df = company.balance_sheet(year)
-            if df is not None and not df.is_empty():
-                finqual_data['balance_sheet'] = df
-                finqual_data['balance_sheet_str'] = df_to_full_string(df)
-                logger.info(f"   ✅ Balance sheet: {df.shape}")
-        except Exception as e:
-            logger.warning(f"   ⚠️  Could not fetch balance sheet: {e}")
-
-        # Fetch cash flow
-        try:
-            df = company.cash_flow(year)
-            if df is not None and not df.is_empty():
-                finqual_data['cash_flow'] = df
-                finqual_data['cash_flow_str'] = df_to_full_string(df)
-                logger.info(f"   ✅ Cash flow: {df.shape}")
-        except Exception as e:
-            logger.warning(f"   ⚠️  Could not fetch cash flow: {e}")
-
-        # Count successful fetches
-        count = sum(1 for v in [finqual_data['income_statement'],
-                                finqual_data['balance_sheet'],
-                                finqual_data['cash_flow']] if v is not None)
-        logger.info(f"📊 Fetched {count}/3 finqual statements for {ticker} {year}")
-
-        return finqual_data
-
-    except ImportError:
-        logger.warning("⚠️  finqual not available - skipping finqual data fetch")
-        return None
-    except Exception as e:
-        logger.error(f"❌ Error fetching finqual data for {ticker} {year}: {e}")
-        return None
-
-
-def save_finqual_to_cache(ticker, year, finqual_data, cache_dir="embeddings_cache"):
-    """
-    Save finqual statements to cache directory.
-
-    Args:
-        ticker: Company ticker symbol
-        year: Fiscal year
-        finqual_data: Dictionary from fetch_finqual_statements
-        cache_dir: Directory for cached data
-    """
-    if finqual_data is None:
-        return
-
-    save_dir = Path(cache_dir) / ticker / str(year)
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    finqual_cache_file = save_dir / "finqual_statements.pkl"
-
-    # Save the string representations (DataFrames are not easily pickle-able)
-    cache_data = {
-        'income_statement_str': finqual_data.get('income_statement_str'),
-        'balance_sheet_str': finqual_data.get('balance_sheet_str'),
-        'cash_flow_str': finqual_data.get('cash_flow_str'),
-        'ticker': ticker,
-        'year': year,
-        'cached_at': datetime.now().isoformat()
-    }
-
-    with open(finqual_cache_file, 'wb') as f:
-        pickle.dump(cache_data, f)
-
-    logger.info(f"💾 Saved finqual statements to {finqual_cache_file}")
-
-
-def load_finqual_from_cache(ticker, year, cache_dir="embeddings_cache"):
-    """
-    Load finqual statements from cache directory.
-
-    Args:
-        ticker: Company ticker symbol
-        year: Fiscal year
-        cache_dir: Directory for cached data
-
-    Returns:
-        Dictionary with string representations of statements, or None if not found
-    """
-    finqual_cache_file = Path(cache_dir) / ticker / str(year) / "finqual_statements.pkl"
-
-    if not finqual_cache_file.exists():
-        return None
-
-    try:
-        with open(finqual_cache_file, 'rb') as f:
-            finqual_data = pickle.load(f)
-        logger.info(f"📥 Loaded finqual statements from cache for {ticker} {year}")
-        return finqual_data
-    except Exception as e:
-        logger.warning(f"⚠️  Could not load finqual cache for {ticker} {year}: {e}")
-        return None
-
-
-def load_filing_data_from_cache(ticker, year, cache_dir="embeddings_cache"):
+def load_filing_data_from_cache(ticker, year, cache_dir="embeddings_cache", filing_type='10-K', filing_period=None):
     """
     Load filing data directly from disk cache without downloading or parsing.
     This is much faster for subsequent runs.
@@ -1672,31 +2207,33 @@ def load_filing_data_from_cache(ticker, year, cache_dir="embeddings_cache"):
         ticker: Company ticker symbol
         year: Fiscal year
         cache_dir: Directory for cached data
+        filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+        filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
 
     Returns:
         Dictionary with filing data and embeddings, or None if not found
     """
-    logger.info(f"📥 Loading cached filing data for {ticker} {year}...")
-    
+    logger.info(f"📥 Loading cached filing data for {ticker} {year} {filing_type} period={filing_period}...")
+
     # Create data processor
     processor = DataProcessor()
-    
+
     # Check if both embeddings and hierarchical data exist
-    if not processor.embeddings_exist_on_disk(ticker, year, cache_dir):
+    if not processor.embeddings_exist_on_disk(ticker, year, cache_dir, filing_type, filing_period):
         logger.warning(f"⚠️  No cached embeddings found for {ticker} {year}")
         return None
-    
-    if not processor.hierarchical_data_exist_on_disk(ticker, year, cache_dir):
+
+    if not processor.hierarchical_data_exist_on_disk(ticker, year, cache_dir, filing_type, filing_period):
         logger.warning(f"⚠️  No cached hierarchical data found for {ticker} {year}")
         return None
-    
+
     # Load embeddings
-    if not processor.load_embeddings_from_disk(ticker, year, cache_dir):
+    if not processor.load_embeddings_from_disk(ticker, year, cache_dir, filing_type, filing_period):
         logger.error(f"❌ Failed to load embeddings for {ticker} {year}")
         return None
-    
+
     # Load hierarchical data
-    hierarchical_data = processor.load_hierarchical_data_from_disk(ticker, year, cache_dir)
+    hierarchical_data = processor.load_hierarchical_data_from_disk(ticker, year, cache_dir, filing_type, filing_period)
     if not hierarchical_data:
         logger.error(f"❌ Failed to load hierarchical data for {ticker} {year}")
         return None
@@ -1711,9 +2248,6 @@ def load_filing_data_from_cache(ticker, year, cache_dir="embeddings_cache"):
     tables = processor.get_tables()
     financial_tables_index = processor.get_financial_tables_index()
 
-    # Load finqual statements from cache
-    finqual_data = load_finqual_from_cache(ticker, year, cache_dir)
-
     # Create enhanced filing data
     enhanced_filing_data = {
         **hierarchical_data,  # Include hierarchical data
@@ -1727,7 +2261,6 @@ def load_filing_data_from_cache(ticker, year, cache_dir="embeddings_cache"):
         'embedding_model': embedding_model,
         'tables': tables,
         'financial_tables_index': financial_tables_index,
-        'finqual_statements': finqual_data,  # Add finqual data
         'data_processor': processor,
         'embedding_metadata': {
             'num_chunks': len(chunks),
@@ -1737,7 +2270,6 @@ def load_filing_data_from_cache(ticker, year, cache_dir="embeddings_cache"):
             'cached': True,
             'hierarchical_cached': True,
             'loaded_from_cache': True,
-            'finqual_cached': finqual_data is not None
         }
     }
     
@@ -1799,6 +2331,75 @@ def download_and_extract_10k_with_embeddings(ticker, start_year, end_year, use_h
             }
     
     logger.info(f"✅ Completed processing {ticker} with embeddings for {len(enhanced_filing_data)} years")
+    return enhanced_filing_data
+
+def download_and_extract_filing_with_embeddings(ticker, start_year, end_year, filing_type='10-K', max_filings=None, use_hierarchical=True, exclude_titles=True, cache_dir="embeddings_cache", filing_date_override=None, filing_period=None, cache_year_override=None, target_period_date=None):
+    """
+    Download and extract any SEC filing type with embeddings.
+    Generalized version of download_and_extract_10k_with_embeddings().
+
+    Args:
+        ticker: Company ticker symbol
+        start_year: Start year for filing search
+        end_year: End year for filing search
+        filing_type: SEC filing type ('10-K', '10-Q', '8-K')
+        max_filings: Maximum number of filings to process (useful for 8-K)
+        use_hierarchical: Whether to use hierarchical chunks
+        exclude_titles: Whether to exclude title/heading chunks
+        cache_dir: Directory for caching embeddings
+        filing_date_override: Optional tuple (start_date, end_date) for narrow date targeting
+        filing_period: Optional sub-key (e.g. "Q2" for 10-Q, "2023-08-30" for 8-K)
+        cache_year_override: Optional year to use for the cache path instead of the extracted fiscal year.
+                             Useful when the fiscal year extracted from filing content doesn't match
+                             the expected fiscal year (e.g. FinanceBench's doc_period).
+        target_period_date: Optional target period-of-report as 'YYYYMM' for matching correct quarter.
+
+    Returns:
+        Dictionary organized by filing key with embeddings included
+    """
+    logger.info(f"📥 Downloading and processing {ticker} {filing_type} from {start_year} to {end_year} with embeddings (period={filing_period}, cache_year_override={cache_year_override}, target_period={target_period_date})...")
+
+    # Download and extract raw data
+    raw_filing_data = download_and_extract_filing(ticker, start_year, end_year, filing_type=filing_type, max_filings=max_filings, filing_date_override=filing_date_override, target_period_date=target_period_date)
+
+    # Process each filing to create embeddings
+    enhanced_filing_data = {}
+
+    for key, filing_data in raw_filing_data.items():
+        logger.info(f"🔧 Processing {ticker} {filing_type} key={key} with embeddings...")
+
+        try:
+            # Use cache_year_override if provided (ensures cache path matches expected fiscal year)
+            # Otherwise fall back to key (extracted fiscal year) or start_year
+            if cache_year_override is not None:
+                cache_year = cache_year_override
+            elif isinstance(key, int):
+                cache_year = key
+            else:
+                cache_year = start_year
+
+            enhanced_data = create_embeddings_for_filing_data(
+                filing_data,
+                ticker,
+                cache_year,
+                use_hierarchical,
+                exclude_titles,
+                cache_dir,
+                filing_type=filing_type,
+                filing_period=filing_period
+            )
+            enhanced_filing_data[key] = enhanced_data
+
+        except Exception as e:
+            logger.error(f"❌ Failed to create embeddings for {ticker} {filing_type} key={key}: {e}")
+            enhanced_filing_data[key] = {
+                **filing_data,
+                'ticker': ticker,
+                'fiscal_year': key,
+                'embedding_error': str(e)
+            }
+
+    logger.info(f"✅ Completed processing {ticker} {filing_type} with embeddings for {len(enhanced_filing_data)} filings")
     return enhanced_filing_data
 
 def download_and_extract_fiscal_years(ticker, fiscal_years, use_hierarchical=True, exclude_titles=True, cache_dir="embeddings_cache"):

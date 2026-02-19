@@ -27,7 +27,6 @@ pandas
 numpy==2.2.5
 python-multipart
 python-dotenv
-finqual
 
 # AI and LLM
 openai

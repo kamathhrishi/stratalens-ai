@@ -5,6 +5,8 @@ import path from 'path'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // Read .env from project root instead of frontend/
+  envDir: '../',
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -33,12 +35,20 @@ export default defineConfig({
     // Proxy API calls to FastAPI backend during development
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8001',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
       '/chat': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/companies': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/transcript': {
+        target: 'http://localhost:8001',
         changeOrigin: true,
       },
     },

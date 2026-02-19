@@ -136,10 +136,10 @@ class FinancialDataAnalyzer:
         self.executor = ThreadPoolExecutor(max_workers=max_parallel_workers)
 
         self.agent_configs = {
-            'intent_parser': {'model': intent_parser_model, 'temperature': intent_parser_temp, 'llm': None, 'provider': 'openai'},  # NEW: Added provider
-            'table_selection': {'model': table_selection_model, 'temperature': table_selection_temp, 'llm': None, 'provider': 'groq'},  # NEW: Added provider
-            'sql_generation': {'model': sql_generation_model, 'temperature': sql_generation_temp, 'llm': None, 'provider': 'openai'},  # NEW: Added provider
-            'semantic_post_processing': {'model': 'llama-3.1-8b-instant', 'temperature': 0.0, 'llm': None, 'provider': 'groq'}  # NEW: Added provider
+            'intent_parser': {'model': 'gpt-5-nano-2025-08-07', 'temperature': 0, 'llm': None, 'provider': 'openai'},
+            'table_selection': {'model': 'gpt-5-nano-2025-08-07', 'temperature': 0, 'llm': None, 'provider': 'openai'},
+            'sql_generation': {'model': 'gpt-5-nano-2025-08-07', 'temperature': 0, 'llm': None, 'provider': 'openai'},
+            'semantic_post_processing': {'model': 'gpt-5-nano-2025-08-07', 'temperature': 0, 'llm': None, 'provider': 'openai'}
         }
 
         self.available_industries = AVAILABLE_INDUSTRIES
@@ -213,7 +213,7 @@ class FinancialDataAnalyzer:
                         model=config['model'],
                         temperature=config['temperature'],
                         openai_api_key=self.api_key,
-                        max_tokens=2000,
+                        max_completion_tokens=2000,
                         request_timeout=self.llm_timeout
                     )
                 elif config['provider'] == 'groq':
@@ -224,7 +224,7 @@ class FinancialDataAnalyzer:
                         temperature=groq_temperature,
                         openai_api_key=self.groq_api_key,
                         openai_api_base="https://api.groq.com/openai/v1",  # Groq API base URL
-                        max_tokens=2000,
+                        max_completion_tokens=2000,
                         request_timeout=self.llm_timeout
                     )
             except Exception as e:
@@ -1711,7 +1711,7 @@ JSON:
                     {"role": "user", "content": prompt_text}
                 ],
                 temperature=model_temperature,
-                max_tokens=1000,  # Reduced for efficiency
+                max_completion_tokens=1000,  # Reduced for efficiency
                 stream=True
             )
             

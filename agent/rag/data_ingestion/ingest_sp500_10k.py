@@ -12,7 +12,7 @@ Features:
 - Automatically skips already-processed ticker-year combinations
 - Parallel processing for faster ingestion with memory management
 - Each ticker processed in a separate process (prevents memory accumulation)
-- Aggressive garbage collection to prevent finqual memory leaks
+- Aggressive garbage collection to prevent memory leaks
 - Automatic cleanup of temporary files
 - Comprehensive error handling and logging
 
@@ -289,9 +289,6 @@ Examples:
                        help='Retry failed tickers once')
     parser.add_argument('--skip-tickers', type=str, nargs='+',
                        help='Specific tickers to skip (e.g., --skip-tickers AEP AES)')
-    parser.add_argument('--skip-finqual', action='store_true',
-                       help='Skip Finqual financial statement fetching (reduces memory usage)')
-
     args = parser.parse_args()
 
     # Banner
@@ -386,7 +383,7 @@ Examples:
                 logger.info(f"📊 Progress: {idx}/{len(tickers)} ({idx/len(tickers)*100:.1f}%)")
                 logger.info(f"{'=' * 70}")
 
-                result = ingest_ticker(ticker, args.lookback_years, db_integration, skip_finqual=args.skip_finqual)
+                result = ingest_ticker(ticker, args.lookback_years, db_integration)
                 results.append(result)
 
                 # Progress update every 10 tickers
@@ -425,7 +422,7 @@ Examples:
 
         completed = 0
         # Use max_tasks_per_child=1 to ensure each process handles only ONE ticker
-        # This prevents memory accumulation from finqual and other libraries
+        # This prevents memory accumulation from datamule and other libraries
         executor_kwargs = {'max_workers': args.workers}
         if supports_max_tasks:
             executor_kwargs['max_tasks_per_child'] = 1
@@ -433,7 +430,7 @@ Examples:
         with ProcessPoolExecutor(**executor_kwargs) as executor:
             # Submit all tasks with timeout
             future_to_ticker = {
-                executor.submit(ingest_ticker_worker, ticker, args.lookback_years, db_url, args.timeout, args.skip_finqual): ticker
+                executor.submit(ingest_ticker_worker, ticker, args.lookback_years, db_url, args.timeout): ticker
                 for ticker in tickers
             }
 
@@ -481,7 +478,7 @@ Examples:
 
                 with ProcessPoolExecutor(**executor_kwargs) as executor:
                     future_to_ticker = {
-                        executor.submit(ingest_ticker_worker, ticker, args.lookback_years, db_url, args.timeout, args.skip_finqual): ticker
+                        executor.submit(ingest_ticker_worker, ticker, args.lookback_years, db_url, args.timeout): ticker
                         for ticker in failed_tickers
                     }
 
@@ -520,8 +517,6 @@ Examples:
     total_skipped = sum(r.get('filings_skipped', 0) for r in results)
     total_chunks = sum(r.get('chunks_stored', 0) for r in results)
     total_tables = sum(r.get('tables_stored', 0) for r in results)
-    total_finqual = sum(r.get('finqual_stored', 0) for r in results)
-
     successful = [r for r in results if 'error' not in r and r.get('filings_processed', 0) > 0]
     skipped_all = [r for r in results if 'error' not in r and r.get('filings_processed', 0) == 0 and r.get('filings_skipped', 0) > 0]
     failed = [r for r in results if 'error' in r]
@@ -532,8 +527,6 @@ Examples:
     logger.info(f"  Total 10-K filings skipped: {total_skipped}")
     logger.info(f"  Total text chunks: {total_chunks:,}")
     logger.info(f"  Total tables extracted: {total_tables:,}")
-    logger.info(f"  Total Finqual statements: {total_finqual}")
-
     logger.info(f"\n📊 RESULTS BREAKDOWN:")
     logger.info(f"  ✅ Successful: {len(successful)} companies")
     logger.info(f"  ⏭️  Already processed (skipped): {len(skipped_all)} companies")

@@ -250,7 +250,9 @@ async def stream_chat_message_v2(
                 
                 # Execute RAG flow with streaming - events are yielded directly
                 final_result = None
-                
+                accumulated_reasoning = []
+                _REASONING_TYPES = {'reasoning','progress','analysis','search','news_search','10k_search','iteration_start','iteration_search','iteration_transcript_search','iteration_news_search','iteration_followup','iteration_complete','iteration_final','agent_decision','planning_start','planning_complete','retrieval_complete','evaluation_complete','search_complete','10k_planning','10k_retrieval','10k_evaluation','api_retry'}
+
                 async for event in rag_system.execute_rag_flow(
                     question=message,
                     show_details=False,
@@ -263,7 +265,7 @@ async def stream_chat_message_v2(
                     if await request.is_disconnected():
                         logger.warning(f"Client disconnected for user {user_id}")
                         break
-                    
+
                     # Check for cancellation
                     if user_id in active_chat_requests and active_chat_requests[user_id].get("cancelled", False):
                         logger.info(f"Request cancelled for user {user_id}")
@@ -295,21 +297,31 @@ async def stream_chat_message_v2(
                     
                     # Log event being forwarded
                     logger.info(f"📡 ROUTER: Forwarding event to client: type={event.get('type')}, step={event.get('step')}")
-                    
+
+                    event_type = event.get('type')
+
+                    # Accumulate reasoning steps for persistence
+                    if event_type in _REASONING_TYPES and event.get('message'):
+                        accumulated_reasoning.append({
+                            'message': event['message'],
+                            'step': event.get('step', event_type),
+                            'data': event.get('data'),
+                        })
+
                     # Send event
-                    if event.get('type') == 'result':
+                    if event_type == 'result':
                         final_result = event.get('data')
                         query_successful = True
                         logger.info(f"✅ ROUTER: Final result event - query successful")
                         # Inject conversation_id into the final result
                         event['conversation_id'] = str(conversation_id)
                         logger.info(f"📂 Added conversation_id to result: {conversation_id}")
-                    
+
                     yield f"data: {json.dumps(event)}\n\n"
-                    
+
                     # For token events, add small delay to ensure browser receives them in real-time
                     # Without this, tokens arrive too fast and get buffered
-                    if event.get('type') == 'token':
+                    if event_type == 'token':
                         await asyncio.sleep(0.01)  # 10ms delay = ~100 tokens/sec for smooth streaming
                     else:
                         # Minimal yield to allow context switching for other events
@@ -332,7 +344,8 @@ async def stream_chat_message_v2(
                             RETURNING id
                         ''', conversation_id, answer_content, json.dumps(citations_list), json.dumps({
                             'timing': final_result.get('timing', {}),
-                            'comprehensive': comprehensive
+                            'comprehensive': comprehensive,
+                            'reasoning': accumulated_reasoning
                         }))
 
                         # Update conversation timestamp
@@ -553,13 +566,15 @@ async def stream_landing_demo_message_v2(
             
             query_successful = False
             start_time = time.time()
-            
+
             try:
                 logger.info(f"Starting demo stream for session {session_id}")
-                
+
                 # Execute RAG flow with streaming
                 final_result = None
-                
+                accumulated_reasoning = []
+                _DEMO_REASONING_TYPES = {'reasoning','progress','analysis','search','news_search','10k_search','iteration_start','iteration_search','iteration_transcript_search','iteration_news_search','iteration_followup','iteration_complete','iteration_final','agent_decision','planning_start','planning_complete','retrieval_complete','evaluation_complete','search_complete','10k_planning','10k_retrieval','10k_evaluation','api_retry'}
+
                 async for event in rag_system.execute_rag_flow(
                     question=message,
                     show_details=False,
@@ -572,7 +587,16 @@ async def stream_landing_demo_message_v2(
                     if await request.is_disconnected():
                         logger.warning(f"Client disconnected for demo session {session_id}")
                         break
-                    
+
+                    # Accumulate reasoning steps for persistence
+                    event_type_demo = event.get('type')
+                    if event_type_demo in _DEMO_REASONING_TYPES and event.get('message'):
+                        accumulated_reasoning.append({
+                            'message': event['message'],
+                            'step': event.get('step', event_type_demo),
+                            'data': event.get('data'),
+                        })
+
                     # Filter out evaluation reasoning from events before sending (same as authenticated endpoint)
                     if event.get('message') and isinstance(event['message'], str):
                         msg = event['message']
@@ -629,7 +653,8 @@ async def stream_landing_demo_message_v2(
                             RETURNING id
                         ''', conversation_id, answer_content, json.dumps(citations_list), json.dumps({
                             'timing': final_result.get('timing', {}),
-                            'comprehensive': comprehensive
+                            'comprehensive': comprehensive,
+                            'reasoning': accumulated_reasoning
                         }))
 
                         # Update conversation timestamp
@@ -1252,23 +1277,26 @@ async def get_conversation_by_id(
         
         # Get all messages in the conversation
         messages_data = await db.fetch('''
-            SELECT id, role, content, citations, created_at
+            SELECT id, role, content, citations, context, created_at
             FROM chat_messages
             WHERE conversation_id = $1
             ORDER BY created_at ASC
         ''', conv_uuid)
-        
+
         # Build message objects
         messages = []
         for msg_data in messages_data:
             citations_data = json.loads(msg_data['citations']) if msg_data['citations'] else []
             citations = [ChatCitation(**citation) for citation in citations_data]
-            
+            context_data = json.loads(msg_data['context']) if msg_data['context'] else {}
+            reasoning = context_data.get('reasoning', []) if isinstance(context_data, dict) else []
+
             messages.append(ChatConversationMessage(
                 id=str(msg_data['id']),
                 role=msg_data['role'],
                 content=msg_data['content'],
                 citations=citations,
+                reasoning=reasoning,
                 created_at=msg_data['created_at']
             ))
         

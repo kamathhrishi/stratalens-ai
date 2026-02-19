@@ -17,6 +17,7 @@ from app.routers.companies import router as companies_router
 from app.routers.companies_financials import router as companies_financials_router
 from app.routers.screens import router as screens_router
 from app.routers.screener import router as screener_router
+from app.routers.sec_filings import router as sec_filings_router
 from app.routers.transcript import router as transcript_router
 from app.routers.users import router as users_router
 from app.websocket.routes import websocket_endpoint
@@ -36,6 +37,7 @@ def setup_routes(app: FastAPI):
     app.include_router(companies_financials_router)
     app.include_router(chat_router, prefix="/chat")
     app.include_router(screener_router)
+    app.include_router(sec_filings_router)
     app.include_router(transcript_router)
     app.include_router(users_router)
     

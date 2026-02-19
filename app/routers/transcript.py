@@ -1,44 +1,83 @@
 """
 Transcript Router - Handles earnings transcript endpoints
+
+Transcript text lives in the Railway S3 bucket.
+Metadata (ticker, year, quarter, etc.) lives in PostgreSQL (PG_VECTOR).
 """
 
-import json
+import asyncio
 import logging
 import os
 import re
-from typing import Dict
 
+import asyncpg
+import boto3
+from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import ORJSONResponse
 from app.auth.auth_utils import get_current_user, get_optional_user
-
-# RAG system imports (optional)
-try:
-    from agent.rag.transcript_service import TranscriptService
-    RAG_AVAILABLE = True
-except ImportError:
-    RAG_AVAILABLE = False
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Global transcript service instance
-_transcript_service = None
+# ── S3 bucket client ──────────────────────────────────────────────────────────
+_s3 = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("RAILWAY_BUCKET_ENDPOINT", "").strip(),
+    aws_access_key_id=os.getenv("RAILWAY_BUCKET_ACCESS_KEY_ID", "").strip(),
+    aws_secret_access_key=os.getenv("RAILWAY_BUCKET_SECRET_KEY", "").strip(),
+    region_name="auto",
+    config=Config(signature_version="s3v4"),
+)
+_BUCKET_NAME = os.getenv("RAILWAY_BUCKET_NAME", "").strip()
 
-def get_transcript_service() -> TranscriptService:
-    """Get or create the transcript service instance"""
-    global _transcript_service
-    if not RAG_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Transcript features disabled - RAG system not available")
-    
-    if _transcript_service is None:
-        # Create config and database manager
-        from agent.rag.config import Config
-        config = Config()
-        from agent.rag.database_manager import DatabaseManager
-        database_manager = DatabaseManager(config)
-        _transcript_service = TranscriptService(database_manager)
-    
-    return _transcript_service
+# ── DB pool (PG_VECTOR) ───────────────────────────────────────────────────────
+_pg_url = os.getenv("PG_VECTOR", "").strip()
+_pool: asyncpg.Pool | None = None
+
+async def _get_pool() -> asyncpg.Pool:
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(_pg_url, min_size=2, max_size=5)
+    return _pool
+
+# ── In-memory cache for transcript text ──────────────────────────────────────
+_transcript_cache: dict[str, str] = {}
+_MAX_CACHE = 50
+
+
+async def _fetch_transcript_from_bucket(bucket_key: str) -> str:
+    if bucket_key in _transcript_cache:
+        return _transcript_cache[bucket_key]
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None,
+        lambda: _s3.get_object(Bucket=_BUCKET_NAME, Key=bucket_key)
+    )
+    text = response["Body"].read().decode("utf-8")
+    if len(_transcript_cache) >= _MAX_CACHE:
+        _transcript_cache.pop(next(iter(_transcript_cache)))
+    _transcript_cache[bucket_key] = text
+    return text
+
+
+def _inject_highlights(text: str, chunks: list[dict]) -> str:
+    """Wrap relevant chunk text in <span class="highlighted-chunk"> tags."""
+    if not chunks:
+        return text
+    sorted_chunks = sorted(chunks, key=lambda x: len(x.get("chunk_text", "")), reverse=True)
+    for i, chunk in enumerate(sorted_chunks):
+        chunk_text = re.sub(r'\s+', ' ', (chunk.get("chunk_text") or "").strip())
+        if len(chunk_text) < 10:
+            continue
+        replacement = (
+            f'<span class="highlighted-chunk chunk-{i}" '
+            f'data-chunk-id="{chunk.get("chunk_id", "")}">'
+            f'{chunk_text}</span>'
+        )
+        pattern = re.escape(chunk_text)
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE, count=1)
+    return text
 
 
 @router.get("/transcript/{ticker}/{year}/{quarter}")
@@ -48,240 +87,96 @@ async def get_complete_transcript(
     quarter: int,
     current_user: dict = Depends(get_optional_user)
 ):
-    """Get complete earnings transcript for a specific ticker, year, and quarter from database
-    
-    Works for both authenticated users and demo users (no authentication required)
-    """
+    """Fetch transcript metadata from DB, content from bucket."""
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT ticker, company_name, year, quarter, date, bucket_key, metadata, created_at
+            FROM complete_transcripts
+            WHERE UPPER(ticker) = UPPER($1) AND year = $2 AND quarter = $3
+            LIMIT 1
+            """,
+            ticker, year, quarter
+        )
+
+    if not row or not row["bucket_key"]:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Full earnings transcript not yet available for {ticker.upper()} {year} Q{quarter}"
+        )
+    bucket_key = row["bucket_key"]
+
     try:
-        # Get transcript service instance
-        transcript_service = get_transcript_service()
-        
-        # First check if chunks exist for this company/quarter
-        logger.info(f"🔍 Checking chunks availability for {ticker} {year} Q{quarter}")
-        chunks_available = await transcript_service.check_chunks_availability_async(ticker, year, quarter)
-        logger.info(f"🔍 Chunks available result: {chunks_available}")
-        
-        # Retrieve transcript from database
-        transcript_data = await transcript_service.get_complete_transcript_async(ticker, year, quarter)
-        
-        if not transcript_data:
-            if chunks_available:
-                # Chunks exist but complete transcript doesn't
-                logger.info(f"🔍 Chunks exist but transcript missing for {ticker} {year} Q{quarter}")
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"Complete transcript not available for {ticker.upper()} {year} Q{quarter}. Chunks are available for search but the full transcript hasn't been processed yet."
-                )
-            else:
-                # Neither chunks nor transcript exist
-                logger.info(f"🔍 Neither chunks nor transcript exist for {ticker} {year} Q{quarter}")
-                raise HTTPException(
-                    status_code=404, 
-                    detail=f"No transcript data found for {ticker.upper()} {year} Q{quarter}. This transcript may not be available in our database."
-                )
-        
-        # Determine if this is a demo request
-        is_demo = current_user is None
-        user_type = "demo" if is_demo else "authenticated"
-        username = current_user.get('username', 'anonymous') if current_user else 'demo'
-        
-        # Log the request
-        logger.info(f"{user_type.capitalize()} user {username} requested transcript for {ticker.upper()} {year} Q{quarter}")
-        
-        response_data = {
-            "success": True,
-            "ticker": transcript_data['ticker'],
-            "company_name": transcript_data.get('company_name', 'Unknown'),
-            "year": transcript_data['year'],
-            "quarter": transcript_data['quarter'],
-            "date": transcript_data.get('date', 'Unknown'),
-            "transcript_text": transcript_data['full_transcript'],
-            "transcript": transcript_data['full_transcript'],  # Keep both for compatibility
-            "transcript_length": len(transcript_data['full_transcript']),
-            "source": "Database: complete_transcripts table",
-            "metadata": transcript_data.get('metadata', {}),
-            "created_at": transcript_data.get('created_at')
-        }
-        
-        # Add demo_mode flag for demo users
-        if is_demo:
-            response_data["demo_mode"] = True
-        
-        return response_data
-        
-    except HTTPException:
-        raise
+        text = await _fetch_transcript_from_bucket(bucket_key)
     except Exception as e:
-        logger.error(f"Error retrieving transcript from database: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"Failed to fetch transcript from bucket: {e}")
+        raise HTTPException(status_code=503, detail="Could not load transcript from storage")
+
+    return ORJSONResponse({
+        "success": True,
+        "ticker": row["ticker"],
+        "company_name": row["company_name"] or "Unknown",
+        "year": row["year"],
+        "quarter": row["quarter"],
+        "date": row["date"] or "Unknown",
+        "transcript_text": text,
+        "transcript": text,
+        "transcript_length": len(text),
+        "source": "bucket",
+        "metadata": row["metadata"] if isinstance(row["metadata"], dict) else {},
+    })
 
 
 @router.post("/transcript/with-highlights")
 async def get_transcript_with_highlights(
     request: dict,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_optional_user)
 ):
-    """Get transcript with highlighted chunks based on citation data"""
-    try:
-        ticker = request.get("ticker", "").upper()
-        year = request.get("year")
-        quarter = request.get("quarter")
-        relevant_chunks = request.get("relevant_chunks", [])
-        
-        logger.info(f"🎨 DEBUG: get_transcript_with_highlights called with ticker={ticker}, year={year}, quarter={quarter}")
-        logger.info(f"🎨 DEBUG: Received {len(relevant_chunks)} relevant chunks")
-        logger.info(f"🎨 DEBUG: First few chunks: {[chunk.get('chunk_text', '')[:50] + '...' for chunk in relevant_chunks[:3]]}")
-        
-        if not all([ticker, year, quarter]):
-            raise HTTPException(status_code=400, detail="Missing required parameters: ticker, year, quarter")
-        
-        # Construct the filename
-        filename = f"{ticker}_transcript_{year}_Q{quarter}.json"
-        
-        # Try different quarter folders
-        possible_folders = [
-            f"rag/earnings_transcripts_{year}_q{quarter}",
-            f"rag/earnings_transcripts_{year}_q{quarter-1}",  # Fallback to previous quarter
-        ]
-        
-        transcript_data = None
-        used_folder = None
-        
-        for folder in possible_folders:
-            file_path = os.path.join(folder, filename)
-            if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    transcript_data = json.load(f)
-                    used_folder = folder
-                    break
-        
-        if not transcript_data:
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Transcript not found for {ticker} {year} Q{quarter}"
-            )
-        
-        # Extract transcript text
-        transcript_text = ""
-        if 'data' in transcript_data and 'transcript' in transcript_data['data']:
-            transcript_text = transcript_data['data']['transcript']
-        elif 'transcript' in transcript_data:
-            transcript_text = transcript_data['transcript']
-        
-        if not transcript_text:
-            raise HTTPException(status_code=404, detail="No transcript text found")
-        
-        # Create highlighted version
-        logger.info(f"🎨 Creating highlighted transcript with {len(relevant_chunks)} chunks")
-        logger.debug(f"🎨 Relevant chunks: {relevant_chunks}")
-        logger.info(f"🎨 DEBUG: About to call highlight_chunks_in_transcript")
-        highlighted_transcript = highlight_chunks_in_transcript(transcript_text, relevant_chunks)
-        logger.info(f"🎨 Highlighted transcript created, length: {len(highlighted_transcript)}")
-        logger.info(f"🎨 DEBUG: Highlighted transcript contains HTML: {'<span' in highlighted_transcript}")
-        logger.info(f"🎨 DEBUG: Highlighted transcript contains highlighted-chunk: {'highlighted-chunk' in highlighted_transcript}")
-        
-        return {
-            "success": True,
-            "transcript_text": transcript_text,
-            "highlighted_transcript": highlighted_transcript,
-            "metadata": {
-                "ticker": ticker,
-                "year": year,
-                "quarter": quarter,
-                "date": transcript_data.get("data", {}).get("date", "N/A"),
-                "cik": transcript_data.get("data", {}).get("cik", "N/A"),
-                "source_folder": used_folder
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        from app.utils import raise_sanitized_http_exception
-        raise_sanitized_http_exception(
-            e, 
-            "transcript with highlights fetch", 
-            current_user.get("id"),
-            "We're having trouble retrieving the transcript. Please try again later.",
-            status_code=500
+    """Fetch transcript from bucket and inject highlight spans around relevant chunks."""
+    ticker = (request.get("ticker") or "").upper()
+    year = request.get("year")
+    quarter = request.get("quarter")
+    relevant_chunks = request.get("relevant_chunks", [])
+
+    if not all([ticker, year, quarter]):
+        raise HTTPException(status_code=400, detail="Missing required parameters: ticker, year, quarter")
+
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT ticker, company_name, year, quarter, date, bucket_key, metadata
+            FROM complete_transcripts
+            WHERE UPPER(ticker) = UPPER($1) AND year = $2 AND quarter = $3
+            LIMIT 1
+            """,
+            ticker, year, quarter
         )
 
+    if not row or not row["bucket_key"]:
+        raise HTTPException(status_code=404, detail=f"Transcript not found for {ticker} {year} Q{quarter}")
 
-def highlight_chunks_in_transcript(transcript_text: str, relevant_chunks: list) -> str:
-    """Highlight relevant chunks in the transcript text"""
-    logger.info(f"🎨 DEBUG: highlight_chunks_in_transcript called with {len(relevant_chunks) if relevant_chunks else 0} chunks")
-    logger.info(f"🎨 DEBUG: Transcript text length: {len(transcript_text) if transcript_text else 0}")
-    
-    if not relevant_chunks:
-        logger.info("🎨 No relevant chunks provided, returning original transcript")
-        return transcript_text
-    
-    logger.info(f"🎨 Starting highlighting with {len(relevant_chunks)} chunks")
-    logger.info(f"🎨 DEBUG: First few chunks: {[chunk.get('chunk_text', '')[:50] + '...' for chunk in relevant_chunks[:3]]}")
-    
-    # Sort chunks by length (longer first) to avoid conflicts with shorter matches
-    sorted_chunks = sorted(relevant_chunks, key=lambda x: len(x.get("chunk_text", "")), reverse=True)
-    
-    highlighted_text = transcript_text
-    highlighted_count = 0
-    
-    for i, chunk in enumerate(sorted_chunks):
-        chunk_text = chunk.get("chunk_text", "").strip()
-        if not chunk_text or len(chunk_text) < 10:  # Skip very short chunks
-            continue
-            
-        # Clean up the chunk text - remove extra whitespace and normalize
-        chunk_text = re.sub(r'\s+', ' ', chunk_text).strip()
-        
-        # Try multiple matching strategies
-        highlighted = False
-        
-        # Strategy 1: Exact match with word boundaries
-        escaped_chunk = re.escape(chunk_text)
-        pattern = r'\b' + escaped_chunk + r'\b'
-        
-        if re.search(pattern, highlighted_text, re.IGNORECASE):
-            replacement = f'<span class="highlighted-chunk chunk-{i}" data-chunk-id="{chunk.get("chunk_id", "")}" title="Relevant chunk from search results">{chunk_text}</span>'
-            highlighted_text = re.sub(pattern, replacement, highlighted_text, flags=re.IGNORECASE)
-            highlighted = True
-            highlighted_count += 1
-            logger.info(f"🎨 Successfully highlighted chunk {i+1} with exact match")
-        
-        # Strategy 2: If exact match fails, try without word boundaries
-        if not highlighted:
-            pattern = re.escape(chunk_text)
-            if re.search(pattern, highlighted_text, re.IGNORECASE):
-                replacement = f'<span class="highlighted-chunk chunk-{i}" data-chunk-id="{chunk.get("chunk_id", "")}" title="Relevant chunk from search results">{chunk_text}</span>'
-                highlighted_text = re.sub(pattern, replacement, highlighted_text, flags=re.IGNORECASE)
-                highlighted = True
-                highlighted_count += 1
-                logger.info(f"🎨 Successfully highlighted chunk {i+1} with non-word-boundary match")
-        
-        # Strategy 3: If still no match, try with first 5 words
-        if not highlighted and len(chunk_text.split()) >= 5:
-            words = chunk_text.split()[:5]
-            partial_chunk = " ".join(words)
-            pattern = re.escape(partial_chunk)
-            if re.search(pattern, highlighted_text, re.IGNORECASE):
-                replacement = f'<span class="highlighted-chunk chunk-{i}" data-chunk-id="{chunk.get("chunk_id", "")}" title="Relevant chunk from search results">{partial_chunk}</span>'
-                highlighted_text = re.sub(pattern, replacement, highlighted_text, flags=re.IGNORECASE)
-                highlighted = True
-                highlighted_count += 1
-                logger.info(f"🎨 Successfully highlighted chunk {i+1} with 5-word partial match")
-        
-        # Strategy 4: Try with first 3 words as last resort
-        if not highlighted and len(chunk_text.split()) >= 3:
-            words = chunk_text.split()[:3]
-            partial_chunk = " ".join(words)
-            pattern = re.escape(partial_chunk)
-            if re.search(pattern, highlighted_text, re.IGNORECASE):
-                replacement = f'<span class="highlighted-chunk chunk-{i}" data-chunk-id="{chunk.get("chunk_id", "")}" title="Relevant chunk from search results">{partial_chunk}</span>'
-                highlighted_text = re.sub(pattern, replacement, highlighted_text, flags=re.IGNORECASE)
-                highlighted_count += 1
-                logger.info(f"🎨 Successfully highlighted chunk {i+1} with 3-word partial match")
-        
-        if not highlighted:
-            logger.warning(f"🎨 Could not highlight chunk {i+1}: '{chunk_text[:50]}...'")
-    
-    logger.info(f"🎨 Highlighting complete: {highlighted_count}/{len(sorted_chunks)} chunks highlighted")
-    return highlighted_text
+    try:
+        text = await _fetch_transcript_from_bucket(row["bucket_key"])
+    except Exception as e:
+        logger.error(f"Failed to fetch transcript from bucket: {e}")
+        raise HTTPException(status_code=503, detail="Could not load transcript from storage")
+
+    highlighted = _inject_highlights(text, relevant_chunks)
+
+    return ORJSONResponse({
+        "success": True,
+        "transcript_text": text,
+        "transcript": text,
+        "highlighted_transcript": highlighted,
+        "transcript_length": len(text),
+        "metadata": {
+            "ticker": row["ticker"],
+            "year": row["year"],
+            "quarter": row["quarter"],
+            "date": row["date"] or "N/A",
+        },
+    })
+
+

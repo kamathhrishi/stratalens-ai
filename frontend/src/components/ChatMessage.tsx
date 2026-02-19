@@ -1,15 +1,16 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { User, ChevronDown, ChevronUp, FileText, Newspaper, Link as LinkIcon, ExternalLink, Table, Expand, Shrink, Eye } from 'lucide-react'
 import StrataLensLogo from './StrataLensLogo'
-import TranscriptModal from './TranscriptModal'
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ChatMessage as ChatMessageType, Source } from '../lib/api'
 import ReasoningTrace from './ReasoningTrace'
+import type { DocumentPanelContent } from './DocumentPanel'
 
 interface ChatMessageProps {
   message: ChatMessageType
+  onOpenDocument?: (content: DocumentPanelContent) => void
 }
 
 // Citation type detection
@@ -56,6 +57,42 @@ function getCitationTitle(source: Source, type: 'transcript' | '10k' | 'news'): 
   return source.title || 'News Article'
 }
 
+// Convert citation markers in text to markdown links for clickable citations
+// Uses a plain-text marker as link text (no nested brackets) to avoid markdown parsing issues
+function preprocessCitationMarkers(text: string, sources: Source[]): string {
+  if (!sources || sources.length === 0) return text
+  // Build a lookup: marker -> actual source marker (for scroll target)
+  const markerMap = new Map<string, string>()
+  const all10K = sources.every(s => getCitationType(s) === '10k')
+  for (const s of sources) {
+    if (s.marker) {
+      markerMap.set(s.marker, s.marker)
+      // Also map the no-hyphen variant, e.g. [10K1] -> [10K-1]
+      const normalized = s.marker.replace(/-/g, '')
+      if (normalized !== s.marker) markerMap.set(normalized, s.marker)
+    }
+  }
+  // When all sources are 10-K, map plain [1], [2] to [10K-1], [10K-2] so old or alternate model output stays clickable
+  if (all10K && sources.length > 0) {
+    sources.forEach((s, idx) => {
+      if (s.marker) {
+        const num = idx + 1
+        markerMap.set(`[${num}]`, s.marker)
+      }
+    })
+  }
+  // Match [1], [N1], [10K1], [10K-1], [10Q1], etc.
+  return text.replace(/\[(\d+|N\d+|10[KQ]-?\d+)\]/g, (match) => {
+    const actual = markerMap.get(match)
+    if (actual) {
+      const targetInner = actual.slice(1, -1) // strip brackets from actual marker (scroll target)
+      const displayInner = match.slice(1, -1)  // keep original so [1] shows as "1", not "10K-1"
+      return `[${displayInner}](#cite-${targetInner})`
+    }
+    return match
+  })
+}
+
 // Citation badge component - enterprise style
 function CitationBadge({ type }: { type: 'transcript' | '10k' | 'news' }) {
   const badges = {
@@ -73,13 +110,53 @@ function CitationBadge({ type }: { type: 'transcript' | '10k' | 'news' }) {
   )
 }
 
+// Render transcript chunk text with bold speaker names and spacing between speakers
+function TranscriptChunkText({ text }: { text: string }) {
+  const speakerPattern = /^([A-Z][a-zA-Z\s.\-]+[A-Za-z]):\s*/
+
+  type Block = { speaker?: string; lines: string[] }
+  const blocks: Block[] = []
+  let current: Block = { lines: [] }
+
+  for (const line of text.split('\n')) {
+    const match = line.match(speakerPattern)
+    if (match && match[1].length >= 3 && match[1].length <= 60 && !/\d/.test(match[1])) {
+      if (current.speaker || current.lines.some(l => l.trim())) blocks.push(current)
+      current = { speaker: match[1], lines: [line.slice(match[0].length)] }
+    } else {
+      current.lines.push(line)
+    }
+  }
+  blocks.push(current)
+
+  const hasSpeakers = blocks.some(b => b.speaker)
+  if (!hasSpeakers) {
+    return <span className="whitespace-pre-wrap">{text}</span>
+  }
+
+  return (
+    <div>
+      {blocks.map((block, i) => (
+        <div key={i} className={i > 0 ? 'mt-2.5' : ''}>
+          {block.speaker && (
+            <div className="font-bold text-slate-800 text-[11px] mb-0.5 uppercase tracking-wide">{block.speaker}:</div>
+          )}
+          <div className="whitespace-pre-wrap">{block.lines.join('\n')}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // Individual citation card - clickable to expand
 interface CitationCardProps {
   source: Source
   onViewTranscript?: (source: Source) => void
+  onViewSECFiling?: (source: Source) => void
+  highlighted?: boolean
 }
 
-function CitationCard({ source, onViewTranscript }: CitationCardProps) {
+function CitationCard({ source, onViewTranscript, onViewSECFiling, highlighted }: CitationCardProps) {
   const [expanded, setExpanded] = useState(false)
   const type = getCitationType(source)
   const title = getCitationTitle(source, type)
@@ -93,12 +170,13 @@ function CitationCard({ source, onViewTranscript }: CitationCardProps) {
 
   const hasContent = source.chunk_text && source.chunk_text.length > 0
   const canViewTranscript = type === 'transcript' && source.ticker && source.quarter
+  const canViewSECFiling = type === '10k' && source.ticker && source.fiscal_year
 
   return (
     <div
       className={`bg-white border rounded-lg overflow-hidden transition-all ${
         expanded ? 'border-slate-300' : 'border-slate-200'
-      }`}
+      } ${highlighted ? 'ring-2 ring-blue-400 ring-offset-1' : ''}`}
     >
       <div className="p-3">
         <div className="flex items-start justify-between gap-2">
@@ -137,6 +215,20 @@ function CitationCard({ source, onViewTranscript }: CitationCardProps) {
               >
                 <Eye className="w-3.5 h-3.5" />
                 View
+              </button>
+            )}
+            {/* View SEC Filing button - for 10-K, 10-Q, 8-K */}
+            {canViewSECFiling && onViewSECFiling && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onViewSECFiling(source)
+                }}
+                className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
+                title="View full SEC filing with highlighted sections"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                View Filing
               </button>
             )}
             {type === 'news' && source.url && (
@@ -187,8 +279,11 @@ function CitationCard({ source, onViewTranscript }: CitationCardProps) {
             transition={{ duration: 0.2 }}
             className="border-t border-slate-100"
           >
-            <div className="p-3 bg-slate-50 text-sm text-slate-700 whitespace-pre-wrap max-h-64 overflow-y-auto leading-relaxed">
-              {source.chunk_text}
+            <div className="p-3 bg-slate-50 text-sm text-slate-700 max-h-64 overflow-y-auto leading-relaxed">
+              {type === 'transcript'
+                ? <TranscriptChunkText text={source.chunk_text!} />
+                : <span className="whitespace-pre-wrap">{source.chunk_text}</span>
+              }
             </div>
           </motion.div>
         )}
@@ -201,10 +296,20 @@ function CitationCard({ source, onViewTranscript }: CitationCardProps) {
 interface CitationsSectionProps {
   sources: Source[]
   onViewTranscript: (source: Source) => void
+  onViewSECFiling: (source: Source) => void
+  isExpanded?: boolean
+  onToggleExpand?: (v: boolean) => void
+  highlightedMarker?: string | null
 }
 
-function CitationsSection({ sources, onViewTranscript }: CitationsSectionProps) {
-  const [expanded, setExpanded] = useState(false) // Collapsed by default
+function CitationsSection({ sources, onViewTranscript, onViewSECFiling, isExpanded, onToggleExpand, highlightedMarker }: CitationsSectionProps) {
+  const [internalExpanded, setInternalExpanded] = useState(false)
+  const expanded = isExpanded !== undefined ? isExpanded : internalExpanded
+  const toggleExpanded = () => {
+    const next = !expanded
+    if (onToggleExpand) onToggleExpand(next)
+    else setInternalExpanded(next)
+  }
 
   // Group by type
   const transcripts = sources.filter(s => getCitationType(s) === 'transcript')
@@ -220,7 +325,7 @@ function CitationsSection({ sources, onViewTranscript }: CitationsSectionProps) 
     <div className="mt-4 rounded-lg border border-slate-200 overflow-hidden">
       {/* Header - clickable */}
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
         className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 hover:bg-slate-100 transition-colors text-left"
       >
         <div className="flex items-center gap-2">
@@ -258,11 +363,13 @@ function CitationsSection({ sources, onViewTranscript }: CitationsSectionProps) 
                   </h5>
                   <div className="space-y-2">
                     {transcripts.map((source, idx) => (
-                      <CitationCard
-                        key={`transcript-${idx}`}
-                        source={source}
-                        onViewTranscript={onViewTranscript}
-                      />
+                      <div key={`transcript-${idx}`} id={source.marker ? `cite-card-${source.marker.slice(1, -1)}` : undefined}>
+                        <CitationCard
+                          source={source}
+                          onViewTranscript={onViewTranscript}
+                          highlighted={!!highlightedMarker && source.marker === highlightedMarker}
+                        />
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -277,7 +384,13 @@ function CitationsSection({ sources, onViewTranscript }: CitationsSectionProps) 
                   </h5>
                   <div className="space-y-2">
                     {tenKs.map((source, idx) => (
-                      <CitationCard key={`10k-${idx}`} source={source} />
+                      <div key={`10k-${idx}`} id={source.marker ? `cite-card-${source.marker.slice(1, -1)}` : undefined}>
+                        <CitationCard
+                          source={source}
+                          onViewSECFiling={onViewSECFiling}
+                          highlighted={!!highlightedMarker && source.marker === highlightedMarker}
+                        />
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -292,7 +405,9 @@ function CitationsSection({ sources, onViewTranscript }: CitationsSectionProps) 
                   </h5>
                   <div className="space-y-2">
                     {news.map((source, idx) => (
-                      <CitationCard key={`news-${idx}`} source={source} />
+                      <div key={`news-${idx}`} id={source.marker ? `cite-card-${source.marker.slice(1, -1)}` : undefined}>
+                        <CitationCard source={source} highlighted={!!highlightedMarker && source.marker === highlightedMarker} />
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -305,12 +420,21 @@ function CitationsSection({ sources, onViewTranscript }: CitationsSectionProps) 
   )
 }
 
-export default function ChatMessage({ message }: ChatMessageProps) {
+export default function ChatMessage({ message, onOpenDocument }: ChatMessageProps) {
   const [showReasoning, setShowReasoning] = useState(true)
-  const [transcriptModal, setTranscriptModal] = useState<{
-    isOpen: boolean
-    source: Source | null
-  }>({ isOpen: false, source: null })
+  const [citationsExpanded, setCitationsExpanded] = useState(false)
+  const [highlightedMarker, setHighlightedMarker] = useState<string | null>(null)
+
+  const handleCitationClick = useCallback((markerInner: string) => {
+    const fullMarker = `[${markerInner}]`
+    setCitationsExpanded(true)
+    setHighlightedMarker(fullMarker)
+    setTimeout(() => {
+      const el = document.getElementById(`cite-card-${markerInner}`)
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }, 300)
+    setTimeout(() => setHighlightedMarker(null), 2000)
+  }, [])
 
   const isUser = message.role === 'user'
   const hasReasoning = message.reasoning && message.reasoning.length > 0
@@ -339,11 +463,72 @@ export default function ChatMessage({ message }: ChatMessageProps) {
   }
 
   const handleViewTranscript = (source: Source) => {
-    setTranscriptModal({ isOpen: true, source })
+    if (!onOpenDocument) return
+    const qStr = String(source.quarter || '')
+    let formattedQuarter: string
+    // If quarter already contains a year (4 consecutive digits), use it directly
+    if (/\d{4}/.test(qStr)) {
+      formattedQuarter = qStr
+    } else if (source.year && source.quarter) {
+      formattedQuarter = `${source.year}_Q${source.quarter}`
+    } else {
+      formattedQuarter = qStr
+    }
+    onOpenDocument({
+      type: 'transcript',
+      company: source.company || source.ticker || '',
+      ticker: source.ticker || '',
+      quarter: formattedQuarter,
+      relevantChunks: source.chunk_text
+        ? [{ chunk_text: source.chunk_text, chunk_id: source.chunk_id, relevance_score: source.relevance_score || 0.8 }]
+        : getRelevantChunks(source.ticker || '', formattedQuarter),
+    })
   }
 
-  const handleCloseTranscript = () => {
-    setTranscriptModal({ isOpen: false, source: null })
+  const handleViewSECFiling = (source: Source) => {
+    if (!onOpenDocument) return
+    const fiscalYear = typeof source.fiscal_year === 'number'
+      ? source.fiscal_year
+      : parseInt(source.fiscal_year || '2023', 10)
+    const quarter = typeof source.quarter === 'number'
+      ? source.quarter
+      : source.quarter ? parseInt(source.quarter, 10) : undefined
+    onOpenDocument({
+      type: 'sec-filing',
+      ticker: source.ticker || '',
+      filingType: source.type || '10-K',
+      fiscalYear,
+      quarter,
+      filingDate: source.filing_date,
+      relevantChunks: source.chunk_text ? [{
+        chunk_text: source.chunk_text,
+        chunk_id: source.chunk_id,
+        sec_section: source.section,
+        relevance_score: source.relevance_score || 0.8,
+        char_offset: source.char_offset,
+      }] : getSECFilingRelevantChunks(source.ticker || '', fiscalYear, source.type || '10-K'),
+      primaryChunkId: source.chunk_id,
+    })
+  }
+
+  // Get relevant chunks for SEC filing highlighting
+  const getSECFilingRelevantChunks = (ticker: string, fiscalYear: string | number, filingType: string) => {
+    if (!message.sources) return []
+    return message.sources
+      .filter(s => {
+        const sourceType = getCitationType(s)
+        if (sourceType !== '10k') return false
+        const sourceFY = String(s.fiscal_year)
+        const targetFY = String(fiscalYear)
+        return s.ticker === ticker && sourceFY === targetFY && s.type === filingType
+      })
+      .map(s => ({
+        chunk_text: s.chunk_text || '',
+        chunk_id: s.chunk_id,
+        sec_section: s.section,
+        relevance_score: s.relevance_score || 0.8,
+        char_offset: s.char_offset,
+      }))
   }
 
   return (
@@ -384,7 +569,7 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                 {showReasoning ? 'Hide' : 'Show'} reasoning
               </button>
               {showReasoning && (
-                <ReasoningTrace steps={message.reasoning!} isStreaming={message.isStreaming} />
+                <ReasoningTrace steps={message.reasoning!} isStreaming={message.isStreaming} onDocumentClick={onOpenDocument} />
               )}
             </div>
           )}
@@ -420,8 +605,29 @@ export default function ChatMessage({ message }: ChatMessageProps) {
                   prose-td:p-2 prose-td:border prose-td:border-slate-200 prose-td:text-slate-700
                   prose-a:text-[#0a1628] prose-a:font-medium prose-a:underline prose-a:underline-offset-2
                 ">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {message.content}
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      a: ({ href, children }) => {
+                        if (href?.startsWith('#cite-')) {
+                          const marker = href.replace('#cite-', '')
+                          // Extract just the number for display (e.g. "10K-1" -> "1", "N2" -> "2", "3" -> "3")
+                          const displayNum = marker.replace(/^(10[KQ]-?|N)/, '')
+                          return (
+                            <button
+                              onClick={() => handleCitationClick(marker)}
+                              className="inline-flex items-center justify-center w-5 h-5 mx-0.5 text-[10px] font-semibold rounded-full bg-slate-200 text-slate-600 hover:bg-blue-500 hover:text-white cursor-pointer transition-colors align-super -translate-y-0.5"
+                              title={`Jump to source [${marker}]`}
+                            >
+                              {displayNum}
+                            </button>
+                          )
+                        }
+                        return <a href={href}>{children}</a>
+                      }
+                    }}
+                  >
+                    {preprocessCitationMarkers(message.content, message.sources || [])}
                   </ReactMarkdown>
                   {message.isStreaming && (
                     <span className="inline-block w-0.5 h-4 ml-1 bg-[#0a1628] animate-pulse" />
@@ -436,46 +642,15 @@ export default function ChatMessage({ message }: ChatMessageProps) {
             <CitationsSection
               sources={message.sources!}
               onViewTranscript={handleViewTranscript}
+              onViewSECFiling={handleViewSECFiling}
+              isExpanded={citationsExpanded}
+              onToggleExpand={setCitationsExpanded}
+              highlightedMarker={highlightedMarker}
             />
           )}
         </div>
       </motion.div>
 
-      {/* Transcript Modal */}
-      {transcriptModal.source && (() => {
-        // Format quarter properly: combine year + quarter if separate
-        const source = transcriptModal.source
-        let formattedQuarter = ''
-
-        if (source.year && source.quarter) {
-          // Combine year and quarter: "2025" + "2" -> "2025_Q2"
-          formattedQuarter = `${source.year}_Q${source.quarter}`
-        } else if (source.quarter) {
-          // Quarter might already be formatted (e.g., "2025_Q2") or just a number
-          const qStr = String(source.quarter)
-          // Check if it's already in a valid format
-          if (qStr.includes('_') || qStr.includes('Q') || qStr.includes('q')) {
-            formattedQuarter = qStr
-          } else {
-            // Just a number - can't determine year, pass as-is
-            formattedQuarter = qStr
-          }
-        }
-
-        return (
-          <TranscriptModal
-            isOpen={transcriptModal.isOpen}
-            onClose={handleCloseTranscript}
-            company={source.company || source.ticker || ''}
-            ticker={source.ticker || ''}
-            quarter={formattedQuarter}
-            relevantChunks={getRelevantChunks(
-              source.ticker || '',
-              formattedQuarter
-            )}
-          />
-        )
-      })()}
     </>
   )
 }

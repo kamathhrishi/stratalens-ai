@@ -82,6 +82,7 @@ class ChatConversationMessage(BaseModel):
     role: str = Field(..., description="Message role: 'user' or 'assistant'")
     content: str = Field(..., description="Message content")
     citations: List[ChatCitation] = Field(default=[], description="Citations (for assistant messages)")
+    reasoning: List[dict] = Field(default=[], description="Reasoning steps (for assistant messages)")
     created_at: datetime = Field(..., description="When the message was created")
     
     class Config:
