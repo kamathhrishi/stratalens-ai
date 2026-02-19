@@ -212,7 +212,7 @@ class DatabaseManager:
                     import traceback
                     logger.error(f"❌ Stack trace: {traceback.format_exc()}")
                     raise DatabaseConnectionError(
-                        user_message="Unable to connect to the database. Please try again in a moment.",
+                        user_message="There was an unexpected error",
                         technical_message=f"Database connection failed after {max_retries + 1} attempts: {str(e)}"
                     )
                 
