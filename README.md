@@ -71,6 +71,7 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
 4. **Self-Reflection** - Evaluates answer quality and iterates until confident
 5. **Answer Modes** - Configurable iteration depth (2-10 iterations) and quality thresholds (70-95%)
 6. **Search-Optimized Follow-ups** - Generates keyword phrases for better RAG retrieval
+7. **Parallel Multi-Agent Synthesis** - Per-ticker subagents run in parallel; results are synthesized into one unified answer
 
 **Benchmark:** 91% accuracy on [FinanceBench](https://github.com/patronus-ai/financebench) (112 10-K questions), ~10s per question, evaluated using LLM-as-a-judge.
 
@@ -87,7 +88,7 @@ Core agent system implementing **Retrieval-Augmented Generation (RAG)** with **s
 ## Features
 
 - **Earnings Transcripts** (2020-2025) - Word-for-word executive commentary from earnings calls
-- **SEC 10-K Filings** (2024-25) - Official annual reports via specialized retrieval agent (10-Q/8-K coming soon)
+- **SEC 10-K Filings** (2018-2025) - Official annual reports via specialized retrieval agent (10-Q/8-K coming soon)
 - **Real-Time News** - Latest market developments via Tavily search
 - **Financial Screener** - Natural language queries over company fundamentals [in development]
 
@@ -116,6 +117,9 @@ finance_agent/
 │   │   ├── question_analyzer.py    # Semantic routing
 │   │   ├── search_engine.py        # Hybrid transcript search
 │   │   ├── tavily_service.py       # Real-time news
+│   │   ├── earnings_transcript_service.py  # Dedicated earnings transcript retrieval agent
+│   │   ├── search_planner.py       # Search plan generation and temporal reference resolution
+│   │   ├── rag_flow_context.py     # Flow context dataclass for pipeline state
 │   │   └── data_ingestion/         # Data pipeline → see data_ingestion/README.md
 │   └── screener/          # Financial screener
 ├── app/                   # FastAPI application
@@ -166,7 +170,7 @@ Frontend env vars (read from root `.env` via `envDir: '../'` in `vite.config.ts`
 ```bash
 # Ingest data (optional - see agent/rag/data_ingestion/README.md)
 python agent/rag/data_ingestion/download_transcripts.py
-python agent/rag/data_ingestion/ingest_10k_to_database.py --ticker AAPL
+python agent/rag/data_ingestion/ingest_with_structure.py --ticker AAPL --year-start 2020 --year-end 2025
 
 # Run server
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -224,7 +228,7 @@ Data is split between PostgreSQL (embeddings, metadata) and Railway S3 (full fil
 
 **Production (Finance Agent):**
 - Earnings transcript chat with RAG
-- SEC 10-K filings (2024-25)
+- SEC 10-K filings (2018-2025)
 - Real-time streaming responses
 - User authentication
 
