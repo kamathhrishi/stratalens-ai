@@ -1208,9 +1208,9 @@ INSTRUCTIONS:
 End with:
 
 **You might also ask:**
-- [Question on a related metric or trend for the same company/companies]
-- [Question from a different analytical angle for the same company/companies]
-- [Question going deeper on a key finding for the same company/companies]
+- [Write the actual question using the real ticker(s) from this conversation — related metric or trend]
+- [Write the actual question using the real ticker(s) from this conversation — different analytical angle]
+- [Write the actual question using the real ticker(s) from this conversation — deeper on a key finding]
 
 Answer in **markdown format**."""
         elif _mode == "detailed":
@@ -1257,9 +1257,9 @@ INSTRUCTIONS:
 End with:
 
 **You might also ask:**
-- [Question on a related metric or trend for the same company/companies]
-- [Question from a different analytical angle for the same company/companies]
-- [Question going deeper on a key finding for the same company/companies]
+- [Write the actual question using the real ticker(s) from this conversation — related metric or trend]
+- [Write the actual question using the real ticker(s) from this conversation — different analytical angle]
+- [Write the actual question using the real ticker(s) from this conversation — deeper on a key finding]
 
 Answer in **markdown format** with actionable insights across all companies."""
         else:  # standard
@@ -1289,9 +1289,9 @@ INSTRUCTIONS:
 End with:
 
 **You might also ask:**
-- [Question on a related metric or trend for the same company/companies]
-- [Question from a different analytical angle for the same company/companies]
-- [Question going deeper on a key finding for the same company/companies]
+- [Write the actual question using the real ticker(s) from this conversation — related metric or trend]
+- [Write the actual question using the real ticker(s) from this conversation — different analytical angle]
+- [Write the actual question using the real ticker(s) from this conversation — deeper on a key finding]
 
 Answer in **markdown format**."""
 
