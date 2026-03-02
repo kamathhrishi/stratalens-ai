@@ -187,7 +187,7 @@ export default function ReasoningTrace({ steps, isStreaming, defaultCollapsed = 
   if (processedSteps.length === 0) return null
 
   const lastStep = processedSteps[processedSteps.length - 1]
-  const processingText = slowWarning ? 'This is taking a bit longer than usual...' : 'Processing...'
+  const processingText = slowWarning ? 'Almost there, hang tight...' : 'Processing...'
   const summaryText = isStreaming
     ? processingText
     : cleanMessage(lastStep.message).slice(0, 60) + (lastStep.message.length > 60 ? '...' : '')

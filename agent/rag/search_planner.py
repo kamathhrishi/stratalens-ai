@@ -706,8 +706,14 @@ Return ONLY valid JSON with this structure:
         rag_logger.info(f"🔎 _generate_transcript_searches called: tickers={tickers}, quarters={quarters}")
         searches = []
 
-        if not tickers or not quarters:
+        if not tickers:
             return searches
+        if not quarters:
+            # Fallback: use the last 8 quarters for this ticker from the DB
+            rag_logger.warning(f"⚠️ No quarters resolved — falling back to last 8 quarters for {tickers[0]}")
+            quarters = self.database_manager.get_last_n_quarters_for_company(tickers[0], 8) if self.database_manager else []
+            if not quarters:
+                return searches
 
         # Generate search query from topic
         query = self._create_search_query(topic, question_type, 'transcripts')

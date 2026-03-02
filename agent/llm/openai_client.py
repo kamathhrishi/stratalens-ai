@@ -73,22 +73,25 @@ class OpenAILLMClient(LLMClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stream: bool = False,
+        reasoning_effort: Optional[str] = None,
     ) -> Union[str, StreamType]:
         model = model or self._default_model
         temperature = temperature if temperature is not None else self._default_temperature
         max_tokens = max_tokens or self._default_max_tokens
 
-        # gpt-5-nano (and some reasoning models) only support temperature=1
-        if "gpt-5-nano" in (model or "").lower() and temperature != 1:
-            temperature = 1
+        is_reasoning_model = "gpt-5" in (model or "").lower() or (model or "").startswith("o1") or (model or "").startswith("o3")
 
-        kwargs = dict(
+        kwargs: Dict[str, Any] = dict(
             model=model,
             messages=messages,
-            temperature=temperature,
             max_completion_tokens=max_tokens,
             stream=stream,
         )
+        # Reasoning models don't support temperature
+        if not is_reasoning_model:
+            kwargs["temperature"] = temperature
+        if reasoning_effort and is_reasoning_model:
+            kwargs["reasoning_effort"] = reasoning_effort
         response = self.client.chat.completions.create(**kwargs)
 
         if stream:

@@ -58,6 +58,7 @@ class CerebrasLLMClient(LLMClient):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stream: bool = False,
+        reasoning_effort: Optional[str] = None,
     ) -> Union[str, StreamType]:
         client = self._get_client()
         model = model or self._default_model

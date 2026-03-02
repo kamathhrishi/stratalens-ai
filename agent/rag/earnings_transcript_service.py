@@ -48,7 +48,7 @@ class EarningsTranscriptService:
     # ═══════════════════════════════════════════════════════════════════════
 
     def _init_llm_clients(self):
-        """Initialize Cerebras (fast) and Gemini (fallback) LLM clients."""
+        """Initialize Cerebras (fast), OpenAI gpt-5-nano (429 fallback), and Gemini (fallback) LLM clients."""
         import os
 
         # Cerebras
@@ -67,6 +67,25 @@ class EarningsTranscriptService:
             rag_logger.warning(f"⚠️ [Transcript] Cerebras init failed: {e}")
             self.cerebras_client = None
             self.cerebras_available = False
+
+        # OpenAI fallback (used on Cerebras 429)
+        try:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if openai_api_key:
+                from agent.llm.openai_client import OpenAILLMClient
+                self.openai_client = OpenAILLMClient(
+                    api_key=openai_api_key,
+                    default_model="gpt-5-nano-2025-08-07",
+                )
+                self.openai_available = True
+                rag_logger.info("✅ [Transcript] OpenAI fallback client initialized (gpt-5-nano)")
+            else:
+                self.openai_client = None
+                self.openai_available = False
+        except Exception as e:
+            rag_logger.warning(f"⚠️ [Transcript] OpenAI fallback init failed: {e}")
+            self.openai_client = None
+            self.openai_available = False
 
         # Gemini fallback
         try:
@@ -89,12 +108,13 @@ class EarningsTranscriptService:
         temperature: float = 0.1,
         max_tokens: int = 2000,
     ) -> str:
-        """Async LLM call: Cerebras first, Gemini fallback."""
-        max_retries = 3
+        """Async LLM call: Cerebras with retries → OpenAI gpt-5-nano → Gemini."""
+        from cerebras.cloud.sdk import RateLimitError as CerebrasRateLimitError
         last_error = None
 
-        for attempt in range(max_retries):
-            if self.cerebras_available:
+        # --- Cerebras with retries ---
+        if self.cerebras_available:
+            for attempt in range(3):
                 try:
                     response = self.cerebras_client.chat.completions.create(
                         model=self.cerebras_model,
@@ -103,29 +123,47 @@ class EarningsTranscriptService:
                         max_tokens=max_tokens,
                     )
                     return response.choices[0].message.content
+                except CerebrasRateLimitError as e:
+                    last_error = e
+                    if attempt < 2:
+                        wait_time = (attempt + 1) * 5
+                        rag_logger.warning(f"[Transcript] Cerebras 429 (attempt {attempt + 1}/3). Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        rag_logger.warning("[Transcript] Cerebras 429 after max retries — falling back to OpenAI gpt-5-nano")
                 except Exception as e:
                     last_error = e
-                    if is_retryable_error(e) and attempt < max_retries - 1:
+                    if is_retryable_error(e) and attempt < 2:
                         await asyncio.sleep((attempt + 1) * 2)
-                        continue
-                    rag_logger.warning(f"[Transcript] Cerebras failed: {e}, trying Gemini")
+                    else:
+                        rag_logger.warning(f"[Transcript] Cerebras failed: {e}")
+                        break
 
-            if self.gemini_available:
-                try:
-                    import google.generativeai as genai
-                    model = genai.GenerativeModel(self.gemini_model)
-                    prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
-                    response = model.generate_content(prompt)
-                    return response.text
-                except Exception as e:
-                    last_error = e
-                    if is_retryable_error(e) and attempt < max_retries - 1:
-                        await asyncio.sleep((attempt + 1) * 2)
-                        continue
-                    rag_logger.error(f"[Transcript] Gemini failed: {e}")
+        # --- OpenAI fallback ---
+        if self.openai_available:
+            try:
+                result = self.openai_client.complete(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    reasoning_effort="medium",
+                )
+                rag_logger.info("[Transcript] OpenAI gpt-5-nano fallback succeeded")
+                return result
+            except Exception as e:
+                last_error = e
+                rag_logger.warning(f"[Transcript] OpenAI fallback failed: {e}, trying Gemini")
 
-            if not self.cerebras_available and not self.gemini_available:
-                break
+        # --- Gemini fallback ---
+        if self.gemini_available:
+            try:
+                import google.generativeai as genai
+                model = genai.GenerativeModel(self.gemini_model)
+                prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                last_error = e
+                rag_logger.error(f"[Transcript] Gemini fallback failed: {e}")
 
         if last_error:
             raise LLMError(
@@ -351,24 +389,26 @@ CITATION RULES — CRITICAL:
 - Every fact, number, or metric MUST have a [TC-N] citation
 - Do not invent citation numbers — only use numbers that appear in the RETRIEVED PASSAGES above
 
+YEAR FORMATTING — CRITICAL:
+- ALWAYS write full 4-digit years: 2023, 2024, 2025 — NEVER abbreviate as 23, 24, 25, 223, 224, 225
+- In tables, write "Q3 2023", "Q4 2024" — never "Q3 23" or "Q3 223"
+
 OTHER RULES:
 - Provide precise numbers and metrics where available
-- Note if data is missing or unavailable for specific quarters
-- If the user's question requests a specific format (e.g. bullet points, table, brief summary, numbered list), follow that format exactly
+- **Bold every financial figure** (e.g. **$748M**, **+21%**, **$908M**)
+- MANDATORY: If the answer contains data across 2 or more periods or metrics, present it as a markdown table — no bullet lists for multi-period data
+- In prose, refer to the company by name or ticker WITHOUT a dollar sign (write "Datadog" or "DDOG", never "$DDOG")
+- Note if data is missing or unavailable for specific quarters (include as a row in the table with "N/A")
+- If the user's question requests a specific format, follow that format exactly
 - Do not use emojis
 - No external knowledge — only use the provided passages
 
 End your answer with:
 
 **You might also ask:**
-- [Question specific to the same company/ticker and related metric or trend — include the $TICKER in the question]
-- [Question specific to the same company/ticker from a different analytical angle — include the $TICKER]
-- [Question specific to the same company/ticker that goes deeper on a key finding from the answer — include the $TICKER]
-
-Example for a $DDOG billings question:
-- How do billing duration adjustments impact the interpretation of $DDOG billings growth trends across quarters?
-- What is the relationship between $DDOG RPO growth and revenue growth, and what does it signal about customer commitment?
-- Why did $DDOG Q4 2024 bookings reach $1B while reported billings were $908M—what explains the gap?"""
+- [Write a specific follow-up question using the actual company name and ticker (no $ prefix, e.g. "Datadog" or "DDOG") — related metric or trend]
+- [Write a specific follow-up question using the actual company name and ticker (no $ prefix) — different analytical angle]
+- [Write a specific follow-up question using the actual company name and ticker (no $ prefix) — deeper on a key finding]"""
 
         messages = [
             {"role": "system", "content": "You are a precise financial analyst. Answer only from the provided sources. No emojis. CRITICAL: Always cite facts with [TC-N] bracket markers — never use bare numbers alone as citations."},
@@ -497,6 +537,11 @@ Return ONLY valid JSON:
 
             if not accumulated_chunks:
                 rag_logger.warning("[Transcript] No chunks found — stopping early")
+                break
+
+            # Skip answer generation if no new chunks were added this iteration
+            if not chunks_to_show:
+                rag_logger.info("[Transcript] No new chunks this iteration — keeping previous answer")
                 break
 
             # Generate answer using new chunks; previous answer carries earlier [TC-N] refs

@@ -37,6 +37,7 @@ class LLMClient(ABC):
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         stream: bool = False,
+        reasoning_effort: Optional[str] = None,
     ) -> Union[str, StreamType]:
         """
         Run a chat completion.

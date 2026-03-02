@@ -46,12 +46,18 @@ class QuestionAnalyzer:
     """Analyzes and preprocesses questions for the RAG system."""
     
     def __init__(self, openai_api_key: Optional[str] = None, config: Config = None, database_manager = None, llm: Optional[LLMClient] = None):
-        """Initialize the question analyzer. Uses shared LLM from config if llm not provided."""
+        """Initialize the question analyzer. Always uses GPT-5-nano for reasoning."""
         self.config = config or Config()
         self.database_manager = database_manager
-        self.llm = llm if llm is not None else get_llm(self.config, openai_api_key=openai_api_key)
-        self.conversation_memory = ConversationMemory()
-        logger.info(f"✅ QuestionAnalyzer initialized with LLM ({self.llm.provider_name})")
+
+        # Reasoning stage always uses GPT-5-nano for context-aware question analysis
+        from agent.llm.openai_client import OpenAILLMClient
+        api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        self.llm = OpenAILLMClient(api_key=api_key, default_model="gpt-5-nano-2025-08-07")
+        logger.info("✅ QuestionAnalyzer initialized with GPT-5-nano (reasoning stage)")
+
+        # Sliding window: last 5 exchanges, 4000 chars per message
+        self.conversation_memory = ConversationMemory(max_exchanges=5, max_chars_per_message=4000)
 
     # ═════════════════════════════════════════════════════════════════════
     # STAGE 2: QUESTION ANALYSIS (LLM-based Analysis)
@@ -186,7 +192,7 @@ INSTRUCTIONS:
 {ticker_instructions}
 2. Classify question type based on the nature of the question
 3. Extract the main topic/subject of the question (what the user is asking about)
-4. Detect temporal references (e.g., "Q4 2024", "2024", "latest quarter") but do NOT resolve them
+4. Detect temporal references (e.g., "Q4 2024", "2024", "latest quarter") but do NOT resolve them. ALWAYS use digits for counts — never words (e.g. "last 8 quarters" not "last eight quarters", "last 3 years" not "last three years"). If the question says "the same period" or "same N quarters/years", resolve it using the conversation history to produce a concrete time_ref like "last 8 quarters".
 5. Identify any explicit user requests or hints (e.g., "check 10-K", "from earnings call", "latest news")
 6. Assess validity and provide suggestions if needed
 
@@ -413,7 +419,7 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                     )
                 
                 start_time = time.time()
-                model = self.config.get("cerebras_model", "qwen-3-235b-instruct-2507")
+                model = "gpt-5-nano-2025-08-07"
                 rag_logger.info(f"🤖 Sending question to LLM ({self.llm.provider_name}) model: {model} (attempt {attempt + 1}/{max_retries})")
 
                 if LOGFIRE_AVAILABLE and logfire:
@@ -436,6 +442,7 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                             max_tokens=1000,
                             temperature=0.1,
                             stream=False,
+                            reasoning_effort="low",
                         )
                 else:
                     analysis_text = self.llm.complete(
@@ -447,6 +454,7 @@ Example: {{"is_valid": true, "reason": "Valid question", "question_type": "speci
                         max_tokens=1000,
                         temperature=0.1,
                         stream=False,
+                        reasoning_effort="low",
                     )
                 call_time = time.time() - start_time
                 rag_logger.info(f"✅ Received response from LLM in {call_time:.3f}s")

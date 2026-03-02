@@ -1259,12 +1259,14 @@ def identify_section_from_path(path_list, sections_map=None):
     # Convert path to lowercase string
     path_string = " > ".join(path_list).lower()
 
-    # Exhibit attachments (EX-99.1, EX-99.2, etc.) belong to item_9.01
-    # ("Financial Statements and Exhibits") in 8-K filings.
-    # Check the top-level path element for exhibit markers.
+    # Exhibit attachments belong to the filing's exhibit section.
+    # 8-K → item_9.01 ("Financial Statements and Exhibits")
+    # 10-K → item_15 ("Exhibits and Financial Statement Schedules")
     if path_list and path_list[0].lower().startswith('exhibit'):
         if 'item_9.01' in sections_map:
             return 'item_9.01'
+        if 'item_15' in sections_map:
+            return 'item_15'
 
     # Check each SEC section
     for section_key, section_data in sections_map.items():
@@ -1654,83 +1656,101 @@ def calculate_filing_year_range(fiscal_years):
 
 def download_and_extract_10k(ticker, start_year, end_year):
     """
-    Download and extract 10-K for a given ticker and year range.
+    Download and extract 10-K for a given ticker and year range, including all exhibits.
     Returns a dictionary organized by fiscal year.
+
+    Exhibit types downloaded alongside the main 10-K:
+        EX-13   Annual report to shareholders
+        EX-21   List of subsidiaries
+        EX-23   Consent of independent auditors
+        EX-31.1 / EX-31.2  CEO/CFO SOX 302 certifications
+        EX-32.1 / EX-32.2  CEO/CFO SOX 906 certifications
+        EX-99.1 / EX-99.2  Press releases and supplemental financial data
+        EX-10   Material contracts
+        EX-4    Instruments defining rights of securities
+        EX-3.1 / EX-3.2    Articles of incorporation / Bylaws
+
+    Exhibits are matched to their parent 10-K via shared tar archive prefix
+    (accession number) in datamule document paths, then merged into the
+    parent filing's chunk list with an 'Exhibit (EX-XX)' path prefix.
     """
+    EXHIBIT_TYPES_10K = [
+        'EX-13',
+        'EX-21',
+        'EX-23',
+        'EX-31.1', 'EX-31.2',
+        'EX-32.1', 'EX-32.2',
+        'EX-99.1', 'EX-99.2',
+        'EX-10',
+        'EX-4',
+        'EX-3.1', 'EX-3.2',
+    ]
+
+    sections_map = SEC_10K_SECTIONS
+
     portfolio = Portfolio(ticker)
+    submission_types = ['10-K'] + EXHIBIT_TYPES_10K
+    logger.info(f"📎 Downloading 10-K with exhibits for {ticker} ({start_year}-{end_year}): {submission_types}")
     portfolio.download_submissions(
         ticker=ticker,
         filing_date=(f'{start_year}-01-01', f'{end_year}-12-31'),
-        submission_type=['10-K'])
+        submission_type=submission_types)
 
-    # Dictionary to store data organized by fiscal year
     filings_by_year = {}
-    
+
     for document in portfolio.document_type('10-K'):
-        
+
         document.parse()
         logger.info(f"🌳 Parsing hierarchical structure...")
-        
-        # Handle both wrapped and unwrapped document structures
+
         doc_data = document.data.get('document', document.data) if isinstance(document.data, dict) else document.data
-        
-        # Extract fiscal year first to use as key
+
         fiscal_year = extract_fiscal_year(document.data)
         if not fiscal_year:
             logger.warning(f"⚠️  Could not extract fiscal year, skipping document")
             continue
-        
-        # Convert fiscal year to integer for consistent comparison
+
         fiscal_year = int(fiscal_year)
-            
-        logger.info(f"📅 Processing fiscal year: {fiscal_year} (extracted from document content)")
-        logger.info(f"📅 Filing year range: {start_year}-{end_year} (used for document search)")
-        
-        # Extract hierarchical content
+        logger.info(f"📅 Processing fiscal year: {fiscal_year}")
+
         hierarchical_chunks = extract_hierarchical_content(doc_data)
         logger.info(f"📦 Extracted {len(hierarchical_chunks)} hierarchical chunks")
 
-        # Show sample chunks
         if hierarchical_chunks:
-            logger.info(f"📝 Sample chunks:")
             for i, chunk in enumerate(hierarchical_chunks[:3], 1):
                 content_preview = chunk['content'][:100].replace('\n', ' ')
                 logger.info(f"   Chunk {i} ({chunk['type']}): {content_preview}...")
                 if chunk.get('path'):
                     logger.info(f"      Path: {' > '.join(chunk['path'][:3])}")
-        
-        # Extract document text
+
         document_text = extract_text(document.data)
         logger.info(f"📄 Document length: {len(document_text)} characters")
-        
-        # Show text preview
         text_preview = document_text[:300].replace('\n', ' ') if document_text else ""
-        logger.info(f"   Text preview: {text_preview}...")
-        
-        # Create contextual chunks for RAG
-        logger.info(f"🔗 Creating contextual chunks...")
-        contextual_chunks = create_contextual_chunks(hierarchical_chunks)
+
+        contextual_chunks = create_contextual_chunks(hierarchical_chunks, sections_map=sections_map)
         logger.info(f"✅ Created {len(contextual_chunks)} contextual chunks")
 
-        # Count tables in this document
         table_count = sum(1 for chunk in hierarchical_chunks if chunk.get('type') == 'table')
 
-        # Store data organized by fiscal year
-        # If we already have data for this fiscal year, keep the one with more tables
+        # Store tar archive prefix for exhibit matching (accession number before '::')
+        doc_path = str(getattr(document, 'path', ''))
+        tar_prefix = doc_path.split('::')[0] if '::' in doc_path else ''
+
         if fiscal_year in filings_by_year:
             existing_table_count = filings_by_year[fiscal_year].get('_table_count', 0)
             if table_count > existing_table_count:
-                logger.info(f"📊 Replacing previous data for fiscal year {fiscal_year} ({existing_table_count} tables) with new data ({table_count} tables)")
+                logger.info(f"📊 Replacing FY{fiscal_year} ({existing_table_count} → {table_count} tables)")
                 filings_by_year[fiscal_year] = {
                     "hierarchical_chunks": hierarchical_chunks,
                     "contextual_chunks": contextual_chunks,
                     "document_text": document_text,
                     "text_preview": text_preview,
                     "document_length": len(document_text),
-                    "_table_count": table_count  # Internal field for tracking
+                    "_table_count": table_count,
+                    "_tar_prefix": tar_prefix,
                 }
             else:
-                logger.info(f"📊 Keeping previous data for fiscal year {fiscal_year} ({existing_table_count} tables) over new data ({table_count} tables)")
+                logger.info(f"📊 Keeping existing FY{fiscal_year} ({existing_table_count} tables)")
         else:
             filings_by_year[fiscal_year] = {
                 "hierarchical_chunks": hierarchical_chunks,
@@ -1738,9 +1758,62 @@ def download_and_extract_10k(ticker, start_year, end_year):
                 "document_text": document_text,
                 "text_preview": text_preview,
                 "document_length": len(document_text),
-                "_table_count": table_count  # Internal field for tracking
+                "_table_count": table_count,
+                "_tar_prefix": tar_prefix,
             }
-            logger.info(f"✅ Stored data for fiscal year {fiscal_year} ({table_count} tables)")
+            logger.info(f"✅ Stored FY{fiscal_year} ({table_count} tables, tar={tar_prefix[:20]}...)")
+
+    # --- Exhibit processing ---
+    # For each exhibit type, match to parent 10-K via shared tar prefix and merge chunks
+    for ex_type in EXHIBIT_TYPES_10K:
+        try:
+            exhibit_docs = list(portfolio.document_type(ex_type))
+        except Exception:
+            exhibit_docs = []
+
+        if not exhibit_docs:
+            continue
+
+        for ex_doc in exhibit_docs:
+            ex_tar = str(ex_doc.path).split('::')[0] if '::' in str(ex_doc.path) else ''
+
+            # Match exhibit to parent 10-K by accession number (tar prefix)
+            parent_year = None
+            for yr, fdata in filings_by_year.items():
+                if fdata.get('_tar_prefix') == ex_tar and ex_tar:
+                    parent_year = yr
+                    break
+
+            # Fallback: if only one 10-K in range, attach to it
+            if parent_year is None:
+                if len(filings_by_year) == 1:
+                    parent_year = list(filings_by_year.keys())[0]
+                else:
+                    logger.warning(f"⚠️  Could not match exhibit {ex_type} to a parent 10-K, skipping")
+                    continue
+
+            try:
+                ex_doc.parse()
+                ex_data = ex_doc.data.get('document', ex_doc.data) if isinstance(ex_doc.data, dict) else ex_doc.data
+
+                ex_hier_chunks = extract_hierarchical_content(ex_data)
+                for chunk in ex_hier_chunks:
+                    chunk['path'] = [f'Exhibit ({ex_type})'] + chunk.get('path', [])
+                    chunk['exhibit_source'] = ex_type
+
+                ex_text = extract_text(ex_doc.data)
+                ex_ctx_chunks = create_contextual_chunks(ex_hier_chunks, sections_map=sections_map)
+
+                existing = filings_by_year[parent_year]
+                existing['hierarchical_chunks'].extend(ex_hier_chunks)
+                existing['contextual_chunks'].extend(ex_ctx_chunks)
+                existing['document_text'] += f"\n\n--- {ex_type} ---\n\n" + ex_text
+                ex_table_count = sum(1 for c in ex_hier_chunks if c.get('type') == 'table')
+                existing['_table_count'] += ex_table_count
+                existing['document_length'] += len(ex_text)
+                logger.info(f"📎 {ex_type} → FY{parent_year}: {len(ex_hier_chunks)} chunks, {ex_table_count} tables, {len(ex_text)} chars")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to parse exhibit {ex_type}: {e}")
 
     return filings_by_year
 

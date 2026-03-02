@@ -9,13 +9,14 @@ Features:
 - 91% accuracy on FinanceBench, ~10s per question
 """
 
+import asyncio
 import logging
 import os
 import json
 import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple, AsyncGenerator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -103,6 +104,25 @@ class SmartParallelSECFilingsService:
             self.cerebras_client = None
             self.cerebras_available = False
 
+        # OpenAI fallback (used on Cerebras 429)
+        try:
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if openai_api_key:
+                from agent.llm.openai_client import OpenAILLMClient
+                self.openai_client = OpenAILLMClient(
+                    api_key=openai_api_key,
+                    default_model="gpt-5-nano-2025-08-07",
+                )
+                self.openai_available = True
+                rag_logger.info("✅ OpenAI fallback client initialized (gpt-5-nano)")
+            else:
+                self.openai_client = None
+                self.openai_available = False
+        except Exception as e:
+            rag_logger.warning(f"⚠️ Failed to load OpenAI fallback: {e}")
+            self.openai_client = None
+            self.openai_available = False
+
         # Gemini client (fallback)
         try:
             import google.generativeai as genai
@@ -135,15 +155,14 @@ class SmartParallelSECFilingsService:
 
     def _make_llm_call(self, messages: List[Dict], temperature: float = 0.1,
                        max_tokens: int = 2000, expect_json: bool = False) -> str:
-        """Make LLM API call with retry logic, preferring Cerebras for speed."""
+        """Make LLM API call: Cerebras with retries → OpenAI gpt-5-nano → Gemini."""
+        from cerebras.cloud.sdk import RateLimitError as CerebrasRateLimitError
         self.current_session['api_calls'] = self.current_session.get('api_calls', 0) + 1
 
-        max_retries = 3
+        # --- Cerebras with retries ---
         last_error = None
-
-        for attempt in range(max_retries):
-            # Try Cerebras first
-            if self.cerebras_available:
+        if self.cerebras_available:
+            for attempt in range(3):
                 try:
                     response = self.cerebras_client.chat.completions.create(
                         model=self.cerebras_model,
@@ -152,38 +171,50 @@ class SmartParallelSECFilingsService:
                         max_tokens=max_tokens
                     )
                     return response.choices[0].message.content
+                except CerebrasRateLimitError as e:
+                    last_error = e
+                    if attempt < 2:
+                        wait_time = (attempt + 1) * 5
+                        rag_logger.warning(f"Cerebras 429 (attempt {attempt + 1}/3). Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        rag_logger.warning("Cerebras 429 after max retries — falling back to OpenAI gpt-5-nano")
                 except Exception as e:
                     last_error = e
-                    if is_retryable_error(e) and attempt < max_retries - 1:
+                    if is_retryable_error(e) and attempt < 2:
                         wait_time = (attempt + 1) * 2
-                        rag_logger.warning(f"Cerebras call failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                        rag_logger.warning(f"Cerebras failed (attempt {attempt + 1}/3): {e}. Retrying in {wait_time}s...")
                         time.sleep(wait_time)
-                        continue
-                    rag_logger.warning(f"Cerebras call failed: {e}, falling back to Gemini")
+                    else:
+                        rag_logger.warning(f"Cerebras failed: {e}")
+                        break
 
-            # Fallback to Gemini
-            if self.gemini_available:
-                try:
-                    import google.generativeai as genai
-                    model = genai.GenerativeModel(self.gemini_model)
-                    # Convert messages to Gemini format
-                    prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
-                    response = model.generate_content(prompt)
-                    return response.text
-                except Exception as e:
-                    last_error = e
-                    if is_retryable_error(e) and attempt < max_retries - 1:
-                        wait_time = (attempt + 1) * 2
-                        rag_logger.warning(f"Gemini call failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue
-                    rag_logger.error(f"Gemini call failed: {e}")
+        # --- OpenAI fallback ---
+        if self.openai_available:
+            try:
+                result = self.openai_client.complete(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    reasoning_effort="medium",
+                )
+                rag_logger.info("OpenAI gpt-5-nano fallback succeeded")
+                return result
+            except Exception as e:
+                last_error = e
+                rag_logger.warning(f"OpenAI fallback failed: {e}, trying Gemini")
 
-            # If we get here without a successful response, break to raise error
-            if not self.cerebras_available and not self.gemini_available:
-                break
+        # --- Gemini fallback ---
+        if self.gemini_available:
+            try:
+                import google.generativeai as genai
+                model = genai.GenerativeModel(self.gemini_model)
+                prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                last_error = e
+                rag_logger.error(f"Gemini fallback failed: {e}")
 
-        # All retries exhausted
         if last_error:
             raise LLMError(
                 user_message=get_user_friendly_message(last_error),
@@ -198,14 +229,14 @@ class SmartParallelSECFilingsService:
 
     async def _make_llm_call_async(self, messages: List[Dict], temperature: float = 0.1,
                                    max_tokens: int = 2000, expect_json: bool = False) -> str:
-        """Async version of _make_llm_call — uses asyncio.sleep so retries don't block the event loop."""
+        """Async LLM call: Cerebras with retries → OpenAI gpt-5-nano → Gemini."""
+        from cerebras.cloud.sdk import RateLimitError as CerebrasRateLimitError
         self.current_session['api_calls'] = self.current_session.get('api_calls', 0) + 1
 
-        max_retries = 3
+        # --- Cerebras with retries ---
         last_error = None
-
-        for attempt in range(max_retries):
-            if self.cerebras_available:
+        if self.cerebras_available:
+            for attempt in range(3):
                 try:
                     response = self.cerebras_client.chat.completions.create(
                         model=self.cerebras_model,
@@ -214,33 +245,49 @@ class SmartParallelSECFilingsService:
                         max_tokens=max_tokens
                     )
                     return response.choices[0].message.content
+                except CerebrasRateLimitError as e:
+                    last_error = e
+                    if attempt < 2:
+                        wait_time = (attempt + 1) * 5
+                        rag_logger.warning(f"Cerebras 429 (attempt {attempt + 1}/3). Retrying in {wait_time}s...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        rag_logger.warning("Cerebras 429 after max retries — falling back to OpenAI gpt-5-nano")
                 except Exception as e:
                     last_error = e
-                    if is_retryable_error(e) and attempt < max_retries - 1:
+                    if is_retryable_error(e) and attempt < 2:
                         wait_time = (attempt + 1) * 2
-                        rag_logger.warning(f"Cerebras call failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                        rag_logger.warning(f"Cerebras failed (attempt {attempt + 1}/3): {e}. Retrying in {wait_time}s...")
                         await asyncio.sleep(wait_time)
-                        continue
-                    rag_logger.warning(f"Cerebras call failed: {e}, falling back to Gemini")
+                    else:
+                        rag_logger.warning(f"Cerebras failed: {e}")
+                        break
 
-            if self.gemini_available:
-                try:
-                    import google.generativeai as genai
-                    model = genai.GenerativeModel(self.gemini_model)
-                    prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
-                    response = model.generate_content(prompt)
-                    return response.text
-                except Exception as e:
-                    last_error = e
-                    if is_retryable_error(e) and attempt < max_retries - 1:
-                        wait_time = (attempt + 1) * 2
-                        rag_logger.warning(f"Gemini call failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
-                        await asyncio.sleep(wait_time)
-                        continue
-                    rag_logger.error(f"Gemini call failed: {e}")
+        # --- OpenAI fallback ---
+        if self.openai_available:
+            try:
+                result = self.openai_client.complete(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    reasoning_effort="medium",
+                )
+                rag_logger.info("OpenAI gpt-5-nano fallback succeeded")
+                return result
+            except Exception as e:
+                last_error = e
+                rag_logger.warning(f"OpenAI fallback failed: {e}, trying Gemini")
 
-            if not self.cerebras_available and not self.gemini_available:
-                break
+        # --- Gemini fallback ---
+        if self.gemini_available:
+            try:
+                import google.generativeai as genai
+                model = genai.GenerativeModel(self.gemini_model)
+                prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                last_error = e
+                rag_logger.error(f"Gemini fallback failed: {e}")
 
         if last_error:
             raise LLMError(
@@ -721,20 +768,21 @@ Now analyze the original question and create the search plan."""
                 rag_logger.error(f"Search failed for '{query[:40]}': {e}")
                 return []
 
-        # Execute in parallel
-        with ThreadPoolExecutor(max_workers=min(len(search_plan), 6)) as executor:
-            futures = {executor.submit(execute_single_search, item): item for item in search_plan}
+        # Execute in parallel using run_in_executor so the event loop isn't blocked
+        # (ThreadPoolExecutor + as_completed is synchronous and blocks SSE streaming)
+        loop = asyncio.get_event_loop()
+        tasks = [loop.run_in_executor(None, execute_single_search, item) for item in search_plan]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for future in as_completed(futures):
-                try:
-                    chunks = future.result()
-                    for chunk in chunks:
-                        chunk_id = chunk.get('id', str(hash(chunk.get('content', '')[:100])))
-                        if chunk_id not in seen_ids:
-                            all_chunks.append(chunk)
-                            seen_ids.add(chunk_id)
-                except Exception as e:
-                    rag_logger.error(f"Future failed: {e}")
+        for result in results:
+            if isinstance(result, Exception):
+                rag_logger.error(f"Search task failed: {result}")
+                continue
+            for chunk in result:
+                chunk_id = chunk.get('id', str(hash(chunk.get('content', '')[:100])))
+                if chunk_id not in seen_ids:
+                    all_chunks.append(chunk)
+                    seen_ids.add(chunk_id)
 
         # Sort: tables first, then by relevance
         all_chunks.sort(key=lambda x: (
@@ -1052,13 +1100,13 @@ SUB-QUESTIONS:
 RETRIEVED DATA:
 {context}
 
-Cite sources using exact markers [10K-1], [10K-2] etc. Provide precise numbers with units (e.g., "$2.5 billion", "$245 million", "42.1%") — never state a bare number without its unit. Note any missing info.
+Cite sources using exact markers [10K-1], [10K-2] etc. Provide precise numbers with units (e.g., "$2.5 billion", "$245 million", "42.1%") — never state a bare number without its unit. **Bold every financial figure** (e.g. **$2.5 billion**, **+15%**, **42,000 employees**). Use a markdown table whenever presenting 2+ values across periods or metrics. Note any missing info.
 
 DERIVED METRICS — CRITICAL: If the question asks for a ratio, per-unit figure, or any value computed from multiple inputs, and the source data contains the required components, compute the result directly. Do not say you cannot calculate it. Show your work (numerator, denominator, result) and cite each component source."""
 
         try:
             messages = [
-                {"role": "system", "content": "Expert financial analyst. ABSOLUTELY NO EMOJIS OR SPECIAL SYMBOLS — use plain text and markdown only. Cite sources with [10K-N] markers. Be precise. CRITICAL: If retrieved data is from a different fiscal year than requested, state this at the top. Never silently answer from a wrong period."},
+                {"role": "system", "content": "Expert financial analyst. ABSOLUTELY NO EMOJIS OR SPECIAL SYMBOLS — use plain text and markdown only. Cite sources with [10K-N] markers. Be precise. Bold ALL financial figures (dollar amounts, percentages, ratios, counts). Use markdown tables for multi-period or multi-metric comparisons. CRITICAL: If retrieved data is from a different fiscal year than requested, state this at the top. Never silently answer from a wrong period."},
                 {"role": "user", "content": prompt}
             ]
 
